@@ -1,0 +1,11 @@
+name = "TotalUnimodularity"
+uuid "dae517f8-2e2b-4a6d-bb8c-ca4a989a6097"
+authors = ["Michael McVeagh <mcveagh@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Combinatorics = "861a8166-3701-5b0c-9a16-15d98fcdc6aa"
+
+[compat]
+julia = "1.6"
