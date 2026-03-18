@@ -158,6 +158,34 @@ function _is_special_matrix(M::Matrix{Int})
     _is_sign_and_permutation_equivalent(M, F_2)
 end
 
+# Return true if any two rows of M are equal or negatives of each other.
+function _has_dependent_rows(M::Matrix{Int})
+    r = size(M, 1)
+    for i in 1:r-1
+        for j in i+1:r
+            @views M[i,:] == M[j,:] && return true
+            @views M[i,:] == -M[j,:] && return true
+        end
+    end
+    return false
+end
+
+# Return true if any two columns of M are equal or negatives of each other.
+function _has_dependent_cols(M::Matrix{Int})
+    c = size(M, 2)
+    for i in 1:c-1
+        for j in i+1:c
+            @views M[:,i] == M[:,j] && return true
+            @views M[:,i] == -M[:,j] && return true
+        end
+    end
+    return false
+end
+
+# Return true if M has any dependent rows or columns.
+_has_dependent_vectors(M::Matrix{Int}) =
+    _has_dependent_rows(M) || _has_dependent_cols(M)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Pivot operation
 # ──────────────────────────────────────────────────────────────────────────────
