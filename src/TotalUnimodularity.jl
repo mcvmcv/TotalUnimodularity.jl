@@ -76,6 +76,43 @@ function _reduce_trivial_vectors(M::Matrix{Int})
     end
 end
 
+# Check if matrix M is equivalent to target under ±1 row/column scalings
+# and row/column permutations. Assumes M and target are both 5×5 {-1,0,1} matrices.
+function _is_sign_and_permutation_equivalent(M::Matrix{Int}, target::Matrix{Int})
+    n = 5
+    # Nonzero counts are invariant under ±1 row/column scaling and permutation
+    sort([count(!iszero, M[i,:]) for i in 1:n]) ==
+        sort([count(!iszero, target[i,:]) for i in 1:n]) || return false
+    sort([count(!iszero, M[:,j]) for j in 1:n]) ==
+        sort([count(!iszero, target[:,j]) for j in 1:n]) || return false
+
+    for row_signs in Iterators.product(fill((-1, 1), n-1)...)
+        row_signs = [1; collect(row_signs)]
+        for col_signs in Iterators.product(fill((-1, 1), n)...)
+            col_signs = collect(col_signs)
+            scaled = Diagonal(row_signs) * M * Diagonal(col_signs)
+            for row_perm in permutations(1:n)
+                for col_perm in permutations(1:n)
+                    scaled[row_perm, col_perm] == target && return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+"""
+    _is_special_matrix(M)
+
+Test whether `M` is equivalent to [`F_1`](@ref) or [`F_2`](@ref) under
+row/column permutations and ±1 row/column scalings.
+"""
+function _is_special_matrix(M::Matrix{Int})
+    size(M) == (5, 5) || return false
+    _is_sign_and_permutation_equivalent(M, F_1) ||
+    _is_sign_and_permutation_equivalent(M, F_2)
+end
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Pivot operation
 # ──────────────────────────────────────────────────────────────────────────────
