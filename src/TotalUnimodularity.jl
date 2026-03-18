@@ -63,8 +63,7 @@ _is_trivial_vector(v::AbstractVector) =
 # Drop all slices along `dim` that are trivial (zero or standard basis vectors).
 # dim=1 drops trivial rows; dim=2 drops trivial columns.
 function _drop_trivial_vectors(M::Matrix{Int}, dim::Int)
-    mask = [!_is_trivial_vector(@view selectdim(M, dim, i))
-            for i in 1:size(M, dim)]
+    mask = [!_is_trivial_vector(s) for s in eachslice(M, dims=dim)]
     return dim == 1 ? M[mask, :] : M[:, mask]
 end
 
