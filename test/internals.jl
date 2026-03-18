@@ -1,3 +1,5 @@
+using Random
+
 import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
                             _is_special_matrix, _drop_trivial_vectors,
                             _reduce_trivial_vectors
@@ -38,6 +40,38 @@ import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
         @test !_is_special_matrix(Matrix{Int}(I, 5, 5))
         @test !_is_special_matrix(Matrix{Int}(I, 3, 3))
         @test !_is_special_matrix(F_1[1:4, 1:4])
+
     end
 
+    @testset "_is_special_matrix random" begin
+        rng = MersenneTwister(42)
+        n = 5
+        for _ in 1:100
+            for target in (F_1, F_2)
+                row_perm = randperm(rng, n)
+                col_perm = randperm(rng, n)
+                row_signs = rand(rng, (-1, 1), n)
+                col_signs = rand(rng, (-1, 1), n)
+                M = Diagonal(row_signs) * target[row_perm, col_perm] * Diagonal(col_signs)
+                @test _is_special_matrix(M)
+            end
+        end
+    end
+
+    @testset "_is_special_matrix rejects non-special" begin
+        rng = MersenneTwister(42)
+        n = 5
+        rejections = 0
+        for _ in 1:1000
+            M = rand(rng, (-1, 0, 1), n, n)
+            # If not TU, definitely not F_1 or F_2
+            if !naive_is_totally_unimodular(M)
+                @test !_is_special_matrix(M)
+                rejections += 1
+            end
+        end
+        # Make sure we actually tested some cases
+        @test rejections > 100
+    end
+    
 end

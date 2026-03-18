@@ -80,22 +80,67 @@ end
 # and row/column permutations. Assumes M and target are both 5×5 {-1,0,1} matrices.
 function _is_sign_and_permutation_equivalent(M::Matrix{Int}, target::Matrix{Int})
     n = 5
-    # Nonzero counts are invariant under ±1 row/column scaling and permutation
-    sort([count(!iszero, M[i,:]) for i in 1:n]) ==
-        sort([count(!iszero, target[i,:]) for i in 1:n]) || return false
-    sort([count(!iszero, M[:,j]) for j in 1:n]) ==
-        sort([count(!iszero, target[:,j]) for j in 1:n]) || return false
+    # Pre-allocate buffers — reused across all iterations
+    row_signs = zeros(Int, n)
+    col_signs = zeros(Int, n)
+    queue = Vector{Tuple{Int,Int}}(undef, 2n)
 
-    for row_signs in Iterators.product(fill((-1, 1), n-1)...)
-        row_signs = [1; collect(row_signs)]
-        for col_signs in Iterators.product(fill((-1, 1), n)...)
-            col_signs = collect(col_signs)
-            scaled = Diagonal(row_signs) * M * Diagonal(col_signs)
-            for row_perm in permutations(1:n)
-                for col_perm in permutations(1:n)
-                    scaled[row_perm, col_perm] == target && return true
+    for row_perm in permutations(1:n)
+        for col_perm in permutations(1:n)
+
+            # Cheap sparsity check before doing any sign work
+            sparsity_ok = true
+            for i in 1:n
+                for j in 1:n
+                    if iszero(M[i,j]) != iszero(target[row_perm[i], col_perm[j]])
+                        sparsity_ok = false
+                        @goto next_col_perm
+                    end
                 end
             end
+
+            # BFS sign propagation
+            fill!(row_signs, 0)
+            fill!(col_signs, 0)
+            row_signs[1] = 1
+            queue[1] = (0, 1)  # 0 = row, 1 = col
+            queue_head = 1
+            queue_tail = 1
+
+            while queue_head <= queue_tail
+                (dim, idx) = queue[queue_head]
+                queue_head += 1
+
+                if dim == 0  # row
+                    for j in 1:n
+                        M[idx, j] == 0 && continue
+                        required = target[row_perm[idx], col_perm[j]] * row_signs[idx] * M[idx, j]
+                        if col_signs[j] == 0
+                            col_signs[j] = required
+                            queue_tail += 1
+                            queue[queue_tail] = (1, j)
+                        elseif col_signs[j] != required
+                            @goto next_col_perm
+                        end
+                    end
+                else  # col
+                    for i in 1:n
+                        M[i, idx] == 0 && continue
+                        required = target[row_perm[i], col_perm[idx]] * col_signs[idx] * M[i, idx]
+                        if row_signs[i] == 0
+                            row_signs[i] = required
+                            queue_tail += 1
+                            queue[queue_tail] = (0, i)
+                        elseif row_signs[i] != required
+                            @goto next_col_perm
+                        end
+                    end
+                end
+            end
+
+            return true  # consistent sign assignment found
+
+            @label next_col_perm
         end
     end
     return false
