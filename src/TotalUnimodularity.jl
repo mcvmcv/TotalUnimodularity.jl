@@ -186,6 +186,60 @@ end
 _has_dependent_vectors(M::Matrix{Int}) =
     _has_dependent_rows(M) || _has_dependent_cols(M)
 
+# Remove one row from each dependent pair of rows.
+function _drop_dependent_rows(M::Matrix{Int})
+    r = size(M, 1)
+    keep = trues(r)
+    for i in 1:r-1
+        keep[i] || continue
+        for j in i+1:r
+            if @views M[i,:] == M[j,:] || M[i,:] == -M[j,:]
+                keep[j] = false
+            end
+        end
+    end
+    return M[keep, :]
+end
+
+# Remove one column from each dependent pair of columns.
+function _drop_dependent_cols(M::Matrix{Int})
+    c = size(M, 2)
+    keep = trues(c)
+    for i in 1:c-1
+        keep[i] || continue
+        for j in i+1:c
+            if @views M[:,i] == M[:,j] || M[:,i] == -M[:,j]
+                keep[j] = false
+            end
+        end
+    end
+    return M[:, keep]
+end
+
+# Remove dependent rows and columns.
+_drop_dependent_vectors(M::Matrix{Int}) =
+    _drop_dependent_cols(_drop_dependent_rows(M))
+
+"""
+    _reduce(M)
+
+Reduce matrix `M` by repeatedly:
+1. Checking all entries are in {-1, 0, 1} — returns `(false, M)` if not
+2. Dropping trivial rows and columns (zero or standard basis vectors)
+3. Dropping linearly dependent rows and columns (equal or opposite pairs)
+
+Returns `(true, reduced_matrix)` if successful, `(false, M)` if entries
+are outside {-1, 0, 1}.
+"""
+function _reduce(M::Matrix{Int})::Tuple{Bool, Matrix{Int}}
+    all(m -> m in (-1, 0, 1), M) || return (false, M)
+    while true
+        N = _drop_trivial_vectors(_drop_trivial_vectors(M, 1), 2)
+        N = _drop_dependent_vectors(N)
+        N == M && return (true, M)
+        M = N
+    end
+end
 # ──────────────────────────────────────────────────────────────────────────────
 # Pivot operation
 # ──────────────────────────────────────────────────────────────────────────────
