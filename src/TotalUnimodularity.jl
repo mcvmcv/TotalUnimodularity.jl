@@ -391,23 +391,97 @@ function _build_h(components::Vector{Vector{Int}},
     h = Graphs.SimpleGraph(p)
 
     for k in 1:p, l in k+1:p
-        # Check if C_k satisfies the condition
+        # Check: ∃ i ∈ C_k such that U_l ⊄ W_i and U_l ∩ W_i ≠ ∅
         k_ok = any(components[k]) do v
             j = orig[v]
-            !issubset(U[k], W_rows[j]) && !isempty(U[k] ∩ W_rows[j])
+            !issubset(U[l], W_rows[j]) && !isempty(U[l] ∩ W_rows[j])
         end
         k_ok || continue
 
-        # Check if C_l satisfies the condition
+        # Check: ∃ j ∈ C_l such that U_k ⊄ W_j and U_k ∩ W_j ≠ ∅
         l_ok = any(components[l]) do v
             j = orig[v]
-            !issubset(U[l], W_rows[j]) && !isempty(U[l] ∩ W_rows[j])
+            !issubset(U[k], W_rows[j]) && !isempty(U[k] ∩ W_rows[j])
         end
         l_ok || continue
 
         Graphs.add_edge!(h, k, l)
     end
     return h
+end
+
+"""
+    _split_submatrices(M, i, components, orig)
+
+Extract submatrices M_1,...,M_p from `M`, where each M_k consists of:
+- Row `i` (the pivot row, i.e. the row for which G_i is disconnected)
+- All rows of `M` with index in component `k`
+
+# Arguments
+- `M`: The matrix being tested
+- `i`: The pivot row index
+- `components`: Connected components of G_i as vectors of vertex indices
+- `orig`: Mapping from vertex index to original row index in M
+
+# Reference
+Schrijver, *Theory of Linear and Integer Programming*, Chapter 20.
+"""
+function _split_submatrices(M::Matrix{Int}, i::Int,
+                             components::Vector{Vector{Int}},
+                             orig::Vector{Int})
+    return [M[[i; [orig[v] for v in component]], :] for component in components]
+end
+
+"""
+    _is_network_matrix(M)
+
+Test whether integer matrix `M` is a network matrix using the recursive
+algorithm of Theorem 20.1.
+
+A matrix is a network matrix if it can be represented by a directed tree `T`
+and digraph `D`, where entry M[a', a] encodes how the unique path in `T`
+between the endpoints of arc `a ∈ D` traverses arc `a' ∈ T`: +1 forwardly,
+-1 backwardly, 0 not at all.
+
+The algorithm proceeds in two cases:
+
+**Case 1:** If all columns of `M` have at most two nonzeros, `M` is a network
+matrix if and only if the row graph G is bipartite.
+
+**Case 2:** If some column has three or more nonzeros, find a row index `i`
+for which G_i is disconnected. If no such `i` exists, `M` is not a network
+matrix. Otherwise, build the graph H on the connected components of G_i —
+`M` is a network matrix if and only if H is bipartite and each submatrix
+M_k is a network matrix (recursively).
+
+# Arguments
+- `M::Matrix{Int}`: An integer matrix with entries in {-1, 0, 1}.
+
+# Reference
+Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.1.
+"""
+function _is_network_matrix(M::Matrix{Int})
+    # Case 1: all columns have ≤2 nonzeros
+    if _all_columns_few_nonzeros(M)
+        return _is_network_matrix_few_nonzeros(M)
+    end
+
+    # Case 2: some column has ≥3 nonzeros
+    result = _find_disconnected_gi(M)
+
+    # All G_i connected → not a network matrix
+    result === nothing && return false
+
+    i, g, components, orig = result
+    W, W_rows, U = _compute_w_sets(M, i, components, orig)
+    h = _build_h(components, orig, W_rows, U)
+
+    # H must be bipartite
+    Graphs.is_bipartite(h) || return false
+
+    # Recursively test each submatrix
+    submatrices = _split_submatrices(M, i, components, orig)
+    return all(_is_network_matrix, submatrices)
 end
 
 # ──────────────────────────────────────────────────────────────────────────────

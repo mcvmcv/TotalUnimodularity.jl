@@ -10,16 +10,18 @@ import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
                             _all_columns_few_nonzeros, _build_row_graph,
                             _is_network_matrix_few_nonzeros,
                             _build_gi, _find_disconnected_gi,
-                            _compute_w_sets, _build_h
+                            _compute_w_sets, _build_h, _is_network_matrix
 
 # Known network matrix with ≥3 nonzeros per column
-M3 = [1  1  1  1  1  1  0  0  0  0  0  0  0  0  0  0  0  0  0  0
-     -1  0  0  0  0  0  1  1  1  1  1  0  0  0  0  0  0  0  0  0
-      0  1  1  1  1  1  1  1  1  1  1  1  1  1  1  0  0  0  0  0
-      0  0  1  0  0  0  0  1  0  0  0  1  0  0  0 -1 -1 -1  0  0
-      0  0  0  1  1  1  0  0  1  1  1  0  1  1  1  1  1  1  1  1
-      0  0  0  0  1  0  0  0  0  1  0  0  0  1  0  0  1  0  1  0
-      0  0  0  0  0  1  0  0  0  0  1  0  0  0  1  0  0  1  0  1]
+const network_matrix = [1 0 1; -1 1 0; 0 -1 -1]
+const M3 = [1  1  1  1  1  1  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+           -1  0  0  0  0  0  1  1  1  1  1  0  0  0  0  0  0  0  0  0
+            0  1  1  1  1  1  1  1  1  1  1  1  1  1  1  0  0  0  0  0
+            0  0  1  0  0  0  0  1  0  0  0  1  0  0  0 -1 -1 -1  0  0
+            0  0  0  1  1  1  0  0  1  1  1  0  1  1  1  1  1  1  1  1
+            0  0  0  0  1  0  0  0  0  1  0  0  0  1  0  0  1  0  1  0
+            0  0  0  0  0  1  0  0  0  0  1  0  0  0  1  0  0  1  0  1]
+const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
 
 
 @testset "Internals" begin
@@ -158,13 +160,13 @@ M3 = [1  1  1  1  1  1  0  0  0  0  0  0  0  0  0  0  0  0  0  0
         @test _all_columns_few_nonzeros([1 0; 0 1; 1 0])
         @test !_all_columns_few_nonzeros(F_1)
         @test !_all_columns_few_nonzeros(F_2)
-        @test _all_columns_few_nonzeros([1 0 1; -1 1 0; 0 -1 -1])
+        @test _all_columns_few_nonzeros(network_matrix)
         @test _all_columns_few_nonzeros([1 1 0 0; -1 0 1 0; 0 -1 0 1; 0 0 -1 -1])
     end
 
     @testset "_is_network_matrix_few_nonzeros" begin
         # Network matrices
-        @test _is_network_matrix_few_nonzeros([1 0 1; -1 1 0; 0 -1 -1])
+        @test _is_network_matrix_few_nonzeros(network_matrix)
         @test _is_network_matrix_few_nonzeros([1 1 0 0; -1 0 1 0; 0 -1 0 1; 0 0 -1 -1])
         # Identity matrix — each column has one nonzero, trivially network
         @test _is_network_matrix_few_nonzeros(Matrix{Int}(I, 3, 3))
@@ -230,14 +232,72 @@ M3 = [1  1  1  1  1  1  0  0  0  0  0  0  0  0  0  0  0  0  0  0
 
         # H should be bipartite for F_2 to pass the network matrix test
         # (F_2 IS a network matrix so H must be bipartite)
-        @test Graphs.is_bipartite(h)
+        @test !Graphs.is_bipartite(h)
         @test Graphs.nv(h) == 4  # 4 components
+        @test Graphs.ne(h) == 6
 
+        # H for M3 should be bipartite (M3 is a network matrix)
         result = _find_disconnected_gi(M3)
         i, g, components, orig = result
         W, W_rows, U = _compute_w_sets(M3, i, components, orig)
         h = _build_h(components, orig, W_rows, U)
         @test Graphs.is_bipartite(h)
+    end
+
+import TotalUnimodularity: _split_submatrices
+
+    @testset "_split_submatrices" begin
+        result = _find_disconnected_gi(F_2)
+        i, g, components, orig = result
+        submatrices = _split_submatrices(F_2, i, components, orig)
+
+        # Should have one submatrix per component
+        @test length(submatrices) == length(components)
+
+        # Each submatrix should contain row i plus one row per component member
+        for (k, component) in enumerate(components)
+            @test size(submatrices[k], 1) == 1 + length(component)
+        end
+
+        # First row of each submatrix should be row i of F_2
+        for Mk in submatrices
+            @test Mk[1, :] == F_2[i, :]
+        end
+
+        # Test with M3
+        result = _find_disconnected_gi(M3)
+        i, g, components, orig = result
+        submatrices = _split_submatrices(M3, i, components, orig)
+        @test length(submatrices) == length(components)
+        for (k, component) in enumerate(components)
+            @test size(submatrices[k], 1) == 1 + length(component)
+        end
+        for Mk in submatrices
+            @test Mk[1, :] == M3[i, :]
+        end
+    end    
+
+    @testset "_is_network_matrix" begin
+        # Known network matrices
+        @test _is_network_matrix(network_matrix)
+        @test _is_network_matrix(M3)
+        @test _is_network_matrix(Matrix{Int}(network_matrix'))
+
+        # F_1 and F_2 are not network matrices
+        @test !_is_network_matrix(F_1)
+        @test !_is_network_matrix(F_2)
+
+        # Transpose of a network matrix may or may not be a network matrix
+        @test !_is_network_matrix(non_network_tu)
+
+        # 1-sum of network matrices is a network matrix
+        @test _is_network_matrix(one_sum(network_matrix, M3))
+
+        # 1-sum involving F_1 or F_2 is not a network matrix
+        @test !_is_network_matrix(one_sum(F_1, network_matrix))
+        @test !_is_network_matrix(one_sum(F_2, network_matrix))
+        @test !_is_network_matrix(one_sum(F_1, M3))
+        @test !_is_network_matrix(one_sum(F_2, M3))
     end
     
 end
