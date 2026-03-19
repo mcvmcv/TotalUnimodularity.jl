@@ -2,6 +2,7 @@ module TotalUnimodularity
 
 using LinearAlgebra
 using Combinatorics
+using Graphs
 
 # Public API
 export naive_is_totally_unimodular
@@ -240,6 +241,84 @@ function _reduce(M::Matrix{Int})::Tuple{Bool, Matrix{Int}}
         M = N
     end
 end
+
+# Return true if all columns of M have at most 2 nonzeros.
+_all_columns_few_nonzeros(M::Matrix{Int}) =
+    all(j -> count(!iszero, M[:, j]) <= 2, 1:size(M, 2))
+
+# Build the undirected graph G on rows for Case 1.
+# Vertices are rows 1..m.
+# For each column with exactly 2 nonzeros in rows i and j:
+#   - same sign: add edge (i,j)
+#   - opposite sign: add path of length 2 via new intermediate vertex
+# Returns a Graphs.SimpleGraph.
+function _build_row_graph(M::Matrix{Int})
+    m, n = size(M)
+    # We may need up to m + n extra vertices for intermediate nodes
+    g = Graphs.SimpleGraph(m + n)
+    next_vertex = m + 1  # first intermediate vertex index
+
+    for j in 1:n
+        rows = findall(!iszero, M[:, j])
+        length(rows) == 2 || continue
+        i, k = rows[1], rows[2]
+        if M[i, j] == M[k, j]  # same sign
+            Graphs.add_edge!(g, i, k)
+        else  # opposite sign — path of length 2
+            Graphs.add_edge!(g, i, next_vertex)
+            Graphs.add_edge!(g, next_vertex, k)
+            next_vertex += 1
+        end
+    end
+    return g
+end
+
+# Case 1: test if M is a network matrix when all columns have ≤2 nonzeros.
+# M is a network matrix iff the row graph G is bipartite.
+function _is_network_matrix_few_nonzeros(M::Matrix{Int})
+    g = _build_row_graph(M)
+    return Graphs.is_bipartite(g)
+end
+
+# Build graph G_i for row index i.
+# Vertices are 1..m with i removed — we map them to 1..m-1.
+# Returns (graph, vertex_map) where vertex_map[v] gives the original row index.
+function _build_gi(M::Matrix{Int}, i::Int)
+    m, n = size(M)
+    # Map original row indices to graph vertices
+    orig = [j for j in 1:m if j != i]  # orig[v] = original row index
+    idx = zeros(Int, m)
+    for (v, j) in enumerate(orig)
+        idx[j] = v  # idx[j] = vertex for row j
+    end
+
+    g = Graphs.SimpleGraph(m - 1)
+    for col in 1:n
+        M[i, col] == 0 || continue  # skip columns with nonzero in row i
+        rows = findall(!iszero, M[:, col])
+        # Add edges between all pairs of rows with nonzeros in this column
+        for a in 1:length(rows), b in a+1:length(rows)
+            Graphs.add_edge!(g, idx[rows[a]], idx[rows[b]])
+        end
+    end
+    return g, orig
+end
+
+# Find the first row index i for which G_i is disconnected.
+# Returns (i, graph, components, vertex_map) or nothing if all G_i are connected.
+function _find_disconnected_gi(M::Matrix{Int})
+    m = size(M, 1)
+    for i in 1:m
+        g, orig = _build_gi(M, i)
+        if !Graphs.is_connected(g)
+            components = Graphs.connected_components(g)
+            return (i, g, components, orig)
+        end
+    end
+    return nothing
+end
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Pivot operation
 # ──────────────────────────────────────────────────────────────────────────────

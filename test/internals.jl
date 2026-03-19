@@ -1,11 +1,17 @@
 using Random
+using Graphs
 
 import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
                             _is_special_matrix, _drop_trivial_vectors,
                             _reduce_trivial_vectors, _has_dependent_rows,
                             _has_dependent_cols, _has_dependent_vectors,
                             _drop_dependent_rows, _drop_dependent_cols,
-                            _drop_dependent_vectors, _reduce
+                            _drop_dependent_vectors, _reduce,
+                            _all_columns_few_nonzeros, _build_row_graph,
+                            _is_network_matrix_few_nonzeros,
+                            _build_gi, _find_disconnected_gi
+
+
 @testset "Internals" begin
 
     @testset "_is_standard_basis_vector" begin
@@ -136,6 +142,61 @@ import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
         ok, N = _reduce([1 0 1; 1 0 1; 0 1 1])
         @test ok
         @test size(N, 1) < 3
+    end
+
+    @testset "_all_columns_few_nonzeros" begin
+        @test _all_columns_few_nonzeros([1 0; 0 1; 1 0])
+        @test !_all_columns_few_nonzeros(F_1)
+        @test !_all_columns_few_nonzeros(F_2)
+        @test _all_columns_few_nonzeros([1 0 1; -1 1 0; 0 -1 -1])
+        @test _all_columns_few_nonzeros([1 1 0 0; -1 0 1 0; 0 -1 0 1; 0 0 -1 -1])
+    end
+
+    @testset "_is_network_matrix_few_nonzeros" begin
+        # Network matrices
+        @test _is_network_matrix_few_nonzeros([1 0 1; -1 1 0; 0 -1 -1])
+        @test _is_network_matrix_few_nonzeros([1 1 0 0; -1 0 1 0; 0 -1 0 1; 0 0 -1 -1])
+        # Identity matrix — each column has one nonzero, trivially network
+        @test _is_network_matrix_few_nonzeros(Matrix{Int}(I, 3, 3))
+        # Non-network: column with same-sign nonzeros creating odd cycle
+        @test _is_network_matrix_few_nonzeros([1 1; 1 1; 0 1])
+        @test !_is_network_matrix_few_nonzeros([1 1 0; 1 0 1; 0 1 1])
+    end
+
+    @testset "_build_gi" begin
+        # Simple matrix where G_1 should be disconnected
+        # Row 1 is [1,1,0,0], rows 2,3 share col 1, rows 4,5 share col 2
+        # but no column has nonzeros in both {2,3} and {4,5} with zero in row 1
+        M = [1 1 0 0; 1 0 1 0; 1 0 0 1; 0 1 1 0; 0 1 0 1]
+        g, orig = _build_gi(M, 1)
+        @test !Graphs.is_connected(g)
+        @test length(Graphs.connected_components(g)) == 2
+    end
+
+    @testset "_find_disconnected_gi" begin
+        # F_1: all G_i connected → not a network matrix
+        @test _find_disconnected_gi(F_1) === nothing
+
+        # F_2: G_1 disconnected with 4 singleton components
+        result = _find_disconnected_gi(F_2)
+        @test result !== nothing
+        i, g, components, orig = result
+        @test i == 1
+        @test length(components) == 4
+
+        # Known network matrix with ≥3 nonzeros per column
+        M3 = [1  1  1  1  1  1  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+             -1  0  0  0  0  0  1  1  1  1  1  0  0  0  0  0  0  0  0  0
+              0  1  1  1  1  1  1  1  1  1  1  1  1  1  1  0  0  0  0  0
+              0  0  1  0  0  0  0  1  0  0  0  1  0  0  0 -1 -1 -1  0  0
+              0  0  0  1  1  1  0  0  1  1  1  0  1  1  1  1  1  1  1  1
+              0  0  0  0  1  0  0  0  0  1  0  0  0  1  0  0  1  0  1  0
+              0  0  0  0  0  1  0  0  0  0  1  0  0  0  1  0  0  1  0  1]
+        result = _find_disconnected_gi(M3)
+        @test result !== nothing
+        i, g, components, orig = result
+        @test i == 3
+        @test length(components) == 2
     end
     
 end
