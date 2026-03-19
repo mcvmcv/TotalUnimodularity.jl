@@ -365,6 +365,51 @@ function _compute_w_sets(M::Matrix{Int}, i::Int,
     return W, W_rows, U
 end
 
+"""
+    _build_h(components, orig, W_rows, U)
+
+Build the graph H on components C_1,...,C_p of G_i.
+
+Two components C_k and C_l are adjacent in H iff:
+- ∃ i ∈ C_k : U_k ⊄ W_i and U_k ∩ W_i ≠ ∅, and
+- ∃ j ∈ C_l : U_l ⊄ W_j and U_l ∩ W_j ≠ ∅
+
+# Arguments
+- `components`: Connected components of G_i
+- `orig`: Mapping from vertex index to original row index
+- `W_rows`: Dict mapping row index => W ∩ support(row)
+- `U`: Vector of sets, U[k] = ∪{W_rows[j] | j ∈ components[k]}
+
+# Reference
+Schrijver, *Theory of Linear and Integer Programming*, Chapter 20.
+"""
+function _build_h(components::Vector{Vector{Int}},
+                  orig::Vector{Int},
+                  W_rows::Dict{Int, Set{Int}},
+                  U::Vector{Set{Int}})
+    p = length(components)
+    h = Graphs.SimpleGraph(p)
+
+    for k in 1:p, l in k+1:p
+        # Check if C_k satisfies the condition
+        k_ok = any(components[k]) do v
+            j = orig[v]
+            !issubset(U[k], W_rows[j]) && !isempty(U[k] ∩ W_rows[j])
+        end
+        k_ok || continue
+
+        # Check if C_l satisfies the condition
+        l_ok = any(components[l]) do v
+            j = orig[v]
+            !issubset(U[l], W_rows[j]) && !isempty(U[l] ∩ W_rows[j])
+        end
+        l_ok || continue
+
+        Graphs.add_edge!(h, k, l)
+    end
+    return h
+end
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Pivot operation
 # ──────────────────────────────────────────────────────────────────────────────

@@ -10,7 +10,17 @@ import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
                             _all_columns_few_nonzeros, _build_row_graph,
                             _is_network_matrix_few_nonzeros,
                             _build_gi, _find_disconnected_gi,
-                            _compute_w_sets
+                            _compute_w_sets, _build_h
+
+# Known network matrix with ≥3 nonzeros per column
+M3 = [1  1  1  1  1  1  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+     -1  0  0  0  0  0  1  1  1  1  1  0  0  0  0  0  0  0  0  0
+      0  1  1  1  1  1  1  1  1  1  1  1  1  1  1  0  0  0  0  0
+      0  0  1  0  0  0  0  1  0  0  0  1  0  0  0 -1 -1 -1  0  0
+      0  0  0  1  1  1  0  0  1  1  1  0  1  1  1  1  1  1  1  1
+      0  0  0  0  1  0  0  0  0  1  0  0  0  1  0  0  1  0  1  0
+      0  0  0  0  0  1  0  0  0  0  1  0  0  0  1  0  0  1  0  1]
+
 
 @testset "Internals" begin
 
@@ -184,14 +194,6 @@ import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
         @test i == 1
         @test length(components) == 4
 
-        # Known network matrix with ≥3 nonzeros per column
-        M3 = [1  1  1  1  1  1  0  0  0  0  0  0  0  0  0  0  0  0  0  0
-             -1  0  0  0  0  0  1  1  1  1  1  0  0  0  0  0  0  0  0  0
-              0  1  1  1  1  1  1  1  1  1  1  1  1  1  1  0  0  0  0  0
-              0  0  1  0  0  0  0  1  0  0  0  1  0  0  0 -1 -1 -1  0  0
-              0  0  0  1  1  1  0  0  1  1  1  0  1  1  1  1  1  1  1  1
-              0  0  0  0  1  0  0  0  0  1  0  0  0  1  0  0  1  0  1  0
-              0  0  0  0  0  1  0  0  0  0  1  0  0  0  1  0  0  1  0  1]
         result = _find_disconnected_gi(M3)
         @test result !== nothing
         i, g, components, orig = result
@@ -220,4 +222,22 @@ import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
         @test U[1] == Set([1,2,3])
     end    
 
+    @testset "_build_h" begin
+        result = _find_disconnected_gi(F_2)
+        i, g, components, orig = result
+        W, W_rows, U = _compute_w_sets(F_2, i, components, orig)
+        h = _build_h(components, orig, W_rows, U)
+
+        # H should be bipartite for F_2 to pass the network matrix test
+        # (F_2 IS a network matrix so H must be bipartite)
+        @test Graphs.is_bipartite(h)
+        @test Graphs.nv(h) == 4  # 4 components
+
+        result = _find_disconnected_gi(M3)
+        i, g, components, orig = result
+        W, W_rows, U = _compute_w_sets(M3, i, components, orig)
+        h = _build_h(components, orig, W_rows, U)
+        @test Graphs.is_bipartite(h)
+    end
+    
 end
