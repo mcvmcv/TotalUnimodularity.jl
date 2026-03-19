@@ -318,6 +318,52 @@ function _find_disconnected_gi(M::Matrix{Int})
     return nothing
 end
 
+"""
+    _compute_w_sets(M, i, components, orig)
+
+Compute the sets W, W_rows and U used in the network matrix recognition
+algorithm (Case 2), given that G_i is disconnected.
+
+- W = column indices where row `i` of `M` is nonzero
+- W_rows[j] = W ∩ support of row `j` (for j ≠ i)
+- U[k] = ∪{W_rows[j] | j ∈ components[k]}
+
+# Arguments
+- `M`: The matrix being tested
+- `i`: The pivot row index (the row for which G_i is disconnected)
+- `components`: Connected components of G_i as vectors of vertex indices
+- `orig`: Mapping from vertex index to original row index in M
+
+# Returns
+`(W, W_rows, U)` where W and each U[k] are `Set{Int}` and W_rows is a
+`Dict{Int, Set{Int}}`.
+
+# Reference
+Schrijver, *Theory of Linear and Integer Programming*, Chapter 20.
+"""
+function _compute_w_sets(M::Matrix{Int}, i::Int,
+                          components::Vector{Vector{Int}},
+                          orig::Vector{Int})
+    m, n = size(M)
+
+    # W = support of row i
+    W = Set(findall(!iszero, M[i, :]))
+
+    # W_j = W ∩ support of row j, for each j ≠ i
+    W_rows = Dict{Int, Set{Int}}()
+    for j in 1:m
+        j == i && continue
+        W_rows[j] = W ∩ Set(findall(!iszero, M[j, :]))
+    end
+
+    # U_k = union of W_j for all j in component k
+    U = Vector{Set{Int}}(undef, length(components))
+    for (k, component) in enumerate(components)
+        U[k] = union(Set{Int}(), [W_rows[orig[v]] for v in component]...)
+    end
+
+    return W, W_rows, U
+end
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Pivot operation

@@ -9,8 +9,8 @@ import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
                             _drop_dependent_vectors, _reduce,
                             _all_columns_few_nonzeros, _build_row_graph,
                             _is_network_matrix_few_nonzeros,
-                            _build_gi, _find_disconnected_gi
-
+                            _build_gi, _find_disconnected_gi,
+                            _compute_w_sets
 
 @testset "Internals" begin
 
@@ -198,5 +198,26 @@ import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
         @test i == 3
         @test length(components) == 2
     end
-    
+
+    @testset "_compute_w_sets" begin
+        # Use F_2 where G_1 is disconnected
+        result = _find_disconnected_gi(F_2)
+        i, g, components, orig = result
+
+        W, W_rows, U = _compute_w_sets(F_2, i, components, orig)
+
+        # W = support of row 1 of F_2 = [1,1,1,1,1] → all columns
+        @test W == Set(1:5)
+
+        # Each W_j should be W ∩ support of row j
+        # Row 2 of F_2 = [1,1,1,0,0] → support = {1,2,3} → W_2 = {1,2,3}
+        @test W_rows[2] == Set([1,2,3])
+        # Row 3 of F_2 = [1,0,1,1,0] → support = {1,3,4} → W_3 = {1,3,4}
+        @test W_rows[3] == Set([1,3,4])
+
+        # U_k = W_j for singleton components
+        # Component 1 = [1] → orig[1] = 2 → U[1] = W_rows[2] = {1,2,3}
+        @test U[1] == Set([1,2,3])
+    end    
+
 end
