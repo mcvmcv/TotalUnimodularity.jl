@@ -11,7 +11,8 @@ import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
                             _is_network_matrix_few_nonzeros,
                             _build_gi, _find_disconnected_gi,
                             _compute_w_sets, _build_h, _is_network_matrix,
-                            _split_submatrices, _decompose, _extract_rank1
+                            _split_submatrices, _decompose, _extract_rank1,
+                            _find_epsilon
 
 # Known network matrix with ≥3 nonzeros per column
 const network_matrix = [1 0 1; -1 1 0; 0 -1 -1]
@@ -348,5 +349,16 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         @test all(x -> x in (-1, 0, 1), f2)
         @test all(x -> x in (0, 1), g2)
         @test f2 * g2 == B2
+    end
+
+    @testset "_find_epsilon" begin
+        # If A4 has a nonzero entry, ε equals that entry
+        A = [1 0; 0 1]
+        @test _find_epsilon(A, [1], [1]) == 1
+        @test _find_epsilon(A, [2], [2]) == 1
+
+        A2 = [1 0; 0 -1]
+        @test _find_epsilon(A2, [2], [2]) == -1
     end    
+    
 end

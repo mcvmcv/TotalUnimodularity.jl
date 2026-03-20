@@ -749,6 +749,85 @@ function _extract_rank1(B::Matrix{Int})
     return reshape(f, m, 1), g
 end
 
+"""
+    _find_epsilon(A, R_rows, K_cols)
+
+Find ε ∈ {+1,-1} for Case 4 of Theorem 20.3.
+
+Build a bipartite graph G on rows and columns of `A`. `R_rows` and `K_cols`
+are the sets of rows and columns intersecting A4. Find a shortest path Π
+from R to K in G, compute δ = sum of A entries on edges of Π (which has odd
+length, so δ is odd), and return:
+
+    ε = +1 if δ ≡  1 (mod 4)
+    ε = -1 if δ ≡ -1 (mod 4)
+
+If A4 = A[R_rows, K_cols] has a nonzero entry, ε equals that entry directly.
+
+# Reference
+Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.3, Case 4.
+"""
+function _find_epsilon(A::Matrix{Int}, R_rows::Vector{Int}, K_cols::Vector{Int})
+    m, n = size(A)
+
+    # Shortcut: if A4 has a nonzero entry, ε equals that entry
+    A4 = A[R_rows, K_cols]
+    nz = findfirst(!iszero, A4)
+    if nz !== nothing
+        return A4[nz]
+    end
+
+    # Build bipartite graph G on rows and columns of A
+    # Row i → vertex i, col j → vertex m+j
+    # Edge (i, m+j) with weight A[i,j] for each nonzero entry
+    sources = R_rows
+    targets = m .+ K_cols
+    target_set = Set(targets)
+
+    # BFS tracking parent and edge weight
+    visited = Dict{Int, Union{Nothing, Tuple{Int,Int}}}()
+    for s in sources
+        visited[s] = nothing
+    end
+    queue = copy(sources)
+    found_target = nothing
+
+    while !isempty(queue) && found_target === nothing
+        v = popfirst!(queue)
+        for i in 1:m, j in 1:n
+            A[i, j] == 0 && continue
+            r_v, c_v = i, m + j
+            # Follow edge in either direction
+            next = v == r_v ? c_v : (v == c_v ? r_v : nothing)
+            next === nothing && continue
+            next in keys(visited) && continue
+            visited[next] = (v, A[i, j])
+            if next in target_set
+                found_target = next
+                break
+            end
+            push!(queue, next)
+        end
+    end
+
+    found_target === nothing && error(
+        "No path from R to K — should have been reduced to Case 2 or 3")
+
+    # Reconstruct path and sum edge weights
+    delta = 0
+    v = found_target
+    while visited[v] !== nothing
+        parent, w = visited[v]
+        delta += w
+        v = parent
+    end
+
+    mod4 = mod(delta, 4)
+    mod4 == 1 && return 1
+    mod4 == 3 && return -1  # ≡ -1 (mod 4)
+    error("δ = $delta is even — path should have odd length")
+end
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Seymour decomposition operations
 # ──────────────────────────────────────────────────────────────────────────────
@@ -900,79 +979,84 @@ function naive_is_totally_unimodular(M::Matrix{Int})
     return true
 end
 
-"""
-    is_totally_unimodular(M)
-
-Test whether integer matrix `M` is totally unimodular using the polynomial-time
-algorithm of Theorem 20.3 (Seymour's decomposition theorem).
-
-A matrix is totally unimodular if and only if it can be constructed from
-network matrices, their transposes, [`F_1`](@ref), and [`F_2`](@ref) via
-[`one_sum`](@ref), [`two_sum`](@ref), and [`three_sum`](@ref).
-
-# Arguments
-- `M::Matrix{Int}`: An integer matrix.
-
-# Reference
-Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.3.
-"""
 function is_totally_unimodular(M::Matrix{Int})::Bool
-    # Step 1: preprocess — check entries and reduce
     ok, M = _reduce(M)
     ok || return false
 
-    # Trivial cases after reduction
     size(M, 1) == 0 || size(M, 2) == 0 && return true
 
-    # Step 2: check if network matrix or its transpose
     _is_network_matrix(M) && return true
     _is_network_matrix(Matrix{Int}(M')) && return true
-
-    # Step 3: check if special matrix (F_1 or F_2 up to permutation/scaling)
     _is_special_matrix(M) && return true
 
-    # Step 4: try Seymour decomposition
     found, (A, B, C, D) = _decompose(M)
-
-    # No decomposition exists → not TU (by Corollary 19.6b)
     found || return false
 
-    # Step 5: recurse based on rank(B) + rank(C)
     rB = rank(B)
     rC = rank(C)
 
     if rB == 0 && rC == 0
-        # Case 1: M is TU iff A and D are TU
         return is_totally_unimodular(A) && is_totally_unimodular(D)
 
     elseif rB == 1 && rC == 0
-        # Case 2: B = f⊗g, M is TU iff [A f] and [g; D] are TU
         f, g = _extract_rank1(B)
         return is_totally_unimodular([A f]) && is_totally_unimodular([g; D])
 
     elseif rB == 0 && rC == 1
-        # Case 3: C = f⊗g, M is TU iff [A; g] and [f D] are TU
         f, g = _extract_rank1(C)
         return is_totally_unimodular([A; g]) && is_totally_unimodular([f D])
 
     elseif rB == 1 && rC == 1
-        # Case 4: construct matrices from (31) and test both
-        # Requires finding ε₁, ε₂ ∈ {+1,-1} via bipartite graph path
-        # TODO: implement Case 4
-        error("Case 4 not yet implemented")
+        f_B, g_B = _extract_rank1(B)
+        f_C, g_C = _extract_rank1(C)
+
+        B_rows    = findall(!iszero, f_B[:, 1])
+        C_cols    = findall(!iszero, g_C[1, :])
+        notB_rows = [i for i in 1:size(A, 1) if i ∉ B_rows]
+        notC_cols = [j for j in 1:size(A, 2) if j ∉ C_cols]
+        A1 = A[notB_rows, notC_cols]
+        A2 = A[notB_rows, C_cols   ]
+        A3 = A[B_rows,    notC_cols]
+        A4 = A[B_rows,    C_cols   ]
+
+        C_rows    = findall(!iszero, f_C[:, 1])
+        B_cols    = findall(!iszero, g_B[1, :])
+        notC_rows = [i for i in 1:size(D, 1) if i ∉ C_rows]
+        notB_cols = [j for j in 1:size(D, 2) if j ∉ B_cols]
+        D1 = D[C_rows,    B_cols   ]
+        D2 = D[C_rows,    notB_cols]
+        D3 = D[notC_rows, B_cols   ]
+        D4 = D[notC_rows, notB_cols]
+
+        ε₁ = _find_epsilon(A, B_rows, C_cols)
+        ε₂ = _find_epsilon(D, C_rows, B_cols)
+
+        nR    = length(B_rows)
+        nK    = length(C_cols)
+        nnotR = length(notB_rows)
+        nnotK = length(notC_cols)
+        nCR   = length(C_rows)
+        nBK   = length(B_cols)
+        nnotCR = length(notC_rows)
+        nnotBK = length(notB_cols)
+
+        mat1 = [A1                  A2              zeros(Int,nnotR,1)  zeros(Int,nnotR,1)
+                A3                  A4              ones(Int,nR,1)      ones(Int,nR,1)
+                zeros(Int,1,nnotK)  ones(Int,1,nK)  0                   ε₂               ]
+
+        mat2 = [ε₁                    zeros(Int,1,nBK)      ones(Int,1,nnotBK)    0
+                ones(Int,nCR,1)       ones(Int,nCR,1)       D1                    D2
+                zeros(Int,nnotCR,1)   zeros(Int,nnotCR,1)   D3                    D4   ]
+
+        return is_totally_unimodular(mat1) && is_totally_unimodular(mat2)
 
     elseif rB == 2 && rC == 0
-        # Case 5: pivot on nonzero entry of B to reduce to Case 4
-        # TODO: implement Case 5
         error("Case 5 not yet implemented")
 
     elseif rB == 0 && rC == 2
-        # Case 6: symmetric to Case 5
-        # TODO: implement Case 6
         error("Case 6 not yet implemented")
 
     else
-        # rank(B) + rank(C) > 2 — shouldn't happen if _decompose is correct
         error("Unexpected rank(B) + rank(C) = $(rB + rC)")
     end
 end
