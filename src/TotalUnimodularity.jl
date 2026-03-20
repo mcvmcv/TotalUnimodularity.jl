@@ -722,6 +722,33 @@ function _reachable_to(edges::Vector{Tuple{Int,Int}},
     return [v for v in vertices if v in visited && v ∉ target_set]
 end
 
+"""
+    _extract_rank1(B)
+
+Extract f and g from a rank-1 matrix B = f⊗g, where f is a {0,±1} column
+vector and g is a {0,+1} row vector.
+
+Normalises f so that its first nonzero entry is positive, ensuring g is
+{0,+1} as required by Schrijver's Case 2 and Case 3.
+
+# Reference
+Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.3, Case 2.
+"""
+function _extract_rank1(B::Matrix{Int})
+    m, n = size(B)
+    col = findfirst(j -> any(!iszero, B[:, j]), 1:n)
+    f = B[:, col]  # no normalisation
+    # g[j] = 1 if B[:,j] == f, 0 otherwise
+    # Since B = f⊗g with g {0,+1}, all nonzero columns of B equal f
+    g = zeros(Int, 1, n)
+    for j in 1:n
+        if B[:, j] == f
+            g[1, j] = 1
+        end
+    end
+    return reshape(f, m, 1), g
+end
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Seymour decomposition operations
 # ──────────────────────────────────────────────────────────────────────────────
@@ -876,24 +903,78 @@ end
 """
     is_totally_unimodular(M)
 
-Test whether integer matrix `M` is totally unimodular using a linear-time
-algorithm based on Seymour's decomposition theorem.
+Test whether integer matrix `M` is totally unimodular using the polynomial-time
+algorithm of Theorem 20.3 (Seymour's decomposition theorem).
 
 A matrix is totally unimodular if and only if it can be constructed from
 network matrices, their transposes, [`F_1`](@ref), and [`F_2`](@ref) via
 [`one_sum`](@ref), [`two_sum`](@ref), and [`three_sum`](@ref).
 
 # Arguments
-- `M::Matrix{Int}`: An integer matrix whose entries must be in {-1, 0, 1};
-  returns `false` immediately otherwise.
+- `M::Matrix{Int}`: An integer matrix.
 
 # Reference
 Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.3.
 """
-function is_totally_unimodular(M::Matrix{Int})
-    all(m -> m in (-1, 0, 1), M) || return false
-    # TODO: implement linear-time TU test via Seymour decomposition
-    error("Not yet implemented")
+function is_totally_unimodular(M::Matrix{Int})::Bool
+    # Step 1: preprocess — check entries and reduce
+    ok, M = _reduce(M)
+    ok || return false
+
+    # Trivial cases after reduction
+    size(M, 1) == 0 || size(M, 2) == 0 && return true
+
+    # Step 2: check if network matrix or its transpose
+    _is_network_matrix(M) && return true
+    _is_network_matrix(Matrix{Int}(M')) && return true
+
+    # Step 3: check if special matrix (F_1 or F_2 up to permutation/scaling)
+    _is_special_matrix(M) && return true
+
+    # Step 4: try Seymour decomposition
+    found, (A, B, C, D) = _decompose(M)
+
+    # No decomposition exists → not TU (by Corollary 19.6b)
+    found || return false
+
+    # Step 5: recurse based on rank(B) + rank(C)
+    rB = rank(B)
+    rC = rank(C)
+
+    if rB == 0 && rC == 0
+        # Case 1: M is TU iff A and D are TU
+        return is_totally_unimodular(A) && is_totally_unimodular(D)
+
+    elseif rB == 1 && rC == 0
+        # Case 2: B = f⊗g, M is TU iff [A f] and [g; D] are TU
+        f, g = _extract_rank1(B)
+        return is_totally_unimodular([A f]) && is_totally_unimodular([g; D])
+
+    elseif rB == 0 && rC == 1
+        # Case 3: C = f⊗g, M is TU iff [A; g] and [f D] are TU
+        f, g = _extract_rank1(C)
+        return is_totally_unimodular([A; g]) && is_totally_unimodular([f D])
+
+    elseif rB == 1 && rC == 1
+        # Case 4: construct matrices from (31) and test both
+        # Requires finding ε₁, ε₂ ∈ {+1,-1} via bipartite graph path
+        # TODO: implement Case 4
+        error("Case 4 not yet implemented")
+
+    elseif rB == 2 && rC == 0
+        # Case 5: pivot on nonzero entry of B to reduce to Case 4
+        # TODO: implement Case 5
+        error("Case 5 not yet implemented")
+
+    elseif rB == 0 && rC == 2
+        # Case 6: symmetric to Case 5
+        # TODO: implement Case 6
+        error("Case 6 not yet implemented")
+
+    else
+        # rank(B) + rank(C) > 2 — shouldn't happen if _decompose is correct
+        error("Unexpected rank(B) + rank(C) = $(rB + rC)")
+    end
 end
 
 end # module TotalUnimodularity

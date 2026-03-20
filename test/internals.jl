@@ -11,7 +11,7 @@ import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
                             _is_network_matrix_few_nonzeros,
                             _build_gi, _find_disconnected_gi,
                             _compute_w_sets, _build_h, _is_network_matrix,
-                            _split_submatrices, _decompose
+                            _split_submatrices, _decompose, _extract_rank1
 
 # Known network matrix with ≥3 nonzeros per column
 const network_matrix = [1 0 1; -1 1 0; 0 -1 -1]
@@ -333,5 +333,20 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         # @test found
         # @test [A B; C D] == one_sum(F_1, network_matrix)
     end
-    
+
+    @testset "_extract_rank1" begin
+        # B = f⊗g where f is {0,±1} and g is {0,+1}
+        B = [1 0 1; -1 0 -1; 0 0 0]
+        f, g = _extract_rank1(B)
+        @test all(x -> x in (-1, 0, 1), f)
+        @test all(x -> x in (0, 1), g)
+        @test f * g == B
+
+        # All nonzero columns equal f directly
+        B2 = [-1 0 -1; 1 0 1; 0 0 0]
+        f2, g2 = _extract_rank1(B2)
+        @test all(x -> x in (-1, 0, 1), f2)
+        @test all(x -> x in (0, 1), g2)
+        @test f2 * g2 == B2
+    end    
 end
