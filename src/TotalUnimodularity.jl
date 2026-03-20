@@ -520,6 +520,208 @@ function pivot(M::Matrix{Int}, k::Int)
       B*Einv  D - B*Einv*C]
 end
 
+"""
+    _decompose(M)
+
+Test whether the rows and columns of `M` can be permuted so that
+
+    M = [A  B]
+        [C  D]
+
+with rank(B) + rank(C) ≤ 2 and both A and D having r + c ≥ 4.
+
+Uses the matroid intersection algorithm of Theorem 20.2.
+
+Returns `(true, (A, B, C, D))` if such a decomposition exists,
+or `(false, (M, M, M, M))` if not.
+
+# Reference
+Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.2.
+"""
+function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
+    m, n = size(M)
+    IM = [Matrix{Int}(I, m, m) M]  # [I | M]
+    N = m + n                       # total columns of IM
+    XI = Set(1:m)                   # column indices of I part
+    XM = Set(m+1:m+n)              # column indices of M part
+    rhoX = rank(IM)
+
+    for S in combinations(1:N, 4)
+        # S must intersect both XI and XM
+        any(s -> s in XI, S) || continue
+        any(s -> s in XM, S) || continue
+        S_set = Set(S)
+
+        for T in combinations(1:N, 4)
+            # T must intersect both XI and XM
+            any(t -> t in XI, T) || continue
+            any(t -> t in XM, T) || continue
+
+            # S and T must be disjoint
+            isempty(S_set ∩ Set(T)) || continue
+
+            # Solve problem (16)
+            found, Y = _solve_submodular(IM, collect(S), collect(T), rhoX)
+            found || continue
+
+            Y_set = Set(Y)
+
+            # Y∩XI → row indices that go to top partition (A, B rows)
+            # Y∩XM → col indices that go to left partition (A, C cols)
+            row_top  = sort([s       for s in Y if s in XI])
+            col_left = sort([s - m   for s in Y if s in XM])
+            row_bot  = sort([i       for i in 1:m if i ∉ Y_set])
+            col_right = sort([j      for j in 1:n if (j + m) ∉ Y_set])
+
+            # Size constraints: A and D must have r + c ≥ 4
+            length(row_top)  + length(col_left)  >= 4 || continue
+            length(row_bot)  + length(col_right) >= 4 || continue
+
+            # Must have at least one row and column in each partition
+            isempty(row_top)  && continue
+            isempty(row_bot)  && continue
+            isempty(col_left) && continue
+            isempty(col_right) && continue
+
+            # Extract submatrices
+            A = M[row_top,  col_left ]
+            B = M[row_top,  col_right]
+            C = M[row_bot,  col_left ]
+            D = M[row_bot,  col_right]
+
+            # Check rank constraint
+            rank(B) + rank(C) <= 2 || continue
+
+            return (true, (A, B, C, D))
+        end
+    end
+    return (false, (M, M, M, M))
+end
+
+function _solve_submodular(IM::Matrix{Int}, S::Vector{Int},
+                            T::Vector{Int}, rhoX::Int)::Tuple{Bool, Vector{Int}}
+    N = size(IM, 2)
+    V = [v for v in 1:N if v ∉ S && v ∉ T]  # V = X\(S∪T)
+    Z = Int[]  # start with Z = ∅
+
+    while true
+        SZ = S ∪ Z
+        TZ = T ∪ Z
+        rhoSZ = rank(IM[:, SZ])
+        rhoTZ = rank(IM[:, TZ])
+
+        # Compute U and W from (19)
+        U = [v for v in V if v ∉ Z &&
+             rank(IM[:, SZ ∪ [v]]) == rhoSZ + 1]
+        W = [v for v in V if v ∉ Z &&
+             rank(IM[:, TZ ∪ [v]]) == rhoTZ + 1]
+
+        # Build digraph D from (18)
+        # For u∈Z, v∈V\Z:
+        #   (u,v) ∈ E iff ρ(S∪(Z\{u})∪{v}) = ρ(S)+|Z|
+        #   (v,u) ∈ E iff ρ(T∪(Z\{u})∪{v}) = ρ(T)+|Z|
+        d_edges = Tuple{Int,Int}[]
+        rhoS = rank(IM[:, S])
+        rhoT = rank(IM[:, T])
+        for u in Z
+            Zminu = [z for z in Z if z != u]
+            for v in V
+                v in Z && continue
+                if rank(IM[:, S ∪ Zminu ∪ [v]]) == rhoS + length(Z)
+                    push!(d_edges, (u, v))
+                end
+                if rank(IM[:, T ∪ Zminu ∪ [v]]) == rhoT + length(Z)
+                    push!(d_edges, (v, u))
+                end
+            end
+        end
+
+        # Find shortest path from U to W in D
+        path = _shortest_path(d_edges, U, W, V)
+
+        if path !== nothing
+            # Case 1: update Z via symmetric difference (20)
+            path_set = Set(path)
+            Z = [v for v in V if (v in Z) ⊻ (v in path_set)]
+        else
+            # Case 2: Y = S ∪ {v ∈ V | path from v to W exists in D} (23)
+            reachable = _reachable_to(d_edges, W, V)
+            Y = sort(S ∪ reachable)  # fixed: no explicit ∪ Z
+
+            # Check ρ(Y) + ρ(X\Y) ≤ ρ(X) + 2
+            XminusY = [v for v in 1:N if v ∉ Y]  # fixed: use full X\Y
+            rhoY = rank(IM[:, Y])
+            rhoXminusY = isempty(XminusY) ? 0 : rank(IM[:, XminusY])
+
+            return (rhoY + rhoXminusY <= rhoX + 2, Y)
+        end
+    end
+end
+
+function _shortest_path(edges::Vector{Tuple{Int,Int}},
+                         sources::Vector{Int},
+                         targets::Vector{Int},
+                         vertices::Vector{Int})
+    (isempty(sources) || isempty(targets)) && return nothing
+    target_set = Set(targets)
+
+    # Check if any source is already a target
+    for s in sources
+        s in target_set && return [s]
+    end
+
+    # BFS
+    visited = Set{Int}(sources)
+    prev = Dict{Int,Int}()
+    queue = copy(sources)
+
+    while !isempty(queue)
+        v = popfirst!(queue)
+        for (u, w) in edges
+            u == v || continue
+            w in visited && continue
+            push!(visited, w)
+            prev[w] = v
+            w in target_set && return _reconstruct_path(prev, Set(sources), w)
+            push!(queue, w)
+        end
+    end
+    return nothing
+end
+
+function _reconstruct_path(prev::Dict{Int,Int}, sources::Set{Int},
+                            target::Int)
+    path = [target]
+    v = target
+    while v ∉ sources
+        v = prev[v]
+        pushfirst!(path, v)
+    end
+    return path
+end
+
+function _reachable_to(edges::Vector{Tuple{Int,Int}},
+                        targets::Vector{Int},
+                        vertices::Vector{Int})
+    isempty(targets) && return Int[]
+    # Reverse the graph and BFS from targets
+    visited = Set{Int}(targets)
+    queue = copy(targets)
+
+    while !isempty(queue)
+        v = popfirst!(queue)
+        for (u, w) in edges
+            w == v || continue  # reversed: follow incoming edges
+            u in visited && continue
+            push!(visited, u)
+            push!(queue, u)
+        end
+    end
+
+    target_set = Set(targets)
+    return [v for v in vertices if v in visited && v ∉ target_set]
+end
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Seymour decomposition operations
 # ──────────────────────────────────────────────────────────────────────────────

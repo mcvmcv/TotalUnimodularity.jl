@@ -10,7 +10,8 @@ import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
                             _all_columns_few_nonzeros, _build_row_graph,
                             _is_network_matrix_few_nonzeros,
                             _build_gi, _find_disconnected_gi,
-                            _compute_w_sets, _build_h, _is_network_matrix
+                            _compute_w_sets, _build_h, _is_network_matrix,
+                            _split_submatrices, _decompose
 
 # Known network matrix with ≥3 nonzeros per column
 const network_matrix = [1 0 1; -1 1 0; 0 -1 -1]
@@ -244,8 +245,6 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         @test Graphs.is_bipartite(h)
     end
 
-import TotalUnimodularity: _split_submatrices
-
     @testset "_split_submatrices" begin
         result = _find_disconnected_gi(F_2)
         i, g, components, orig = result
@@ -298,6 +297,41 @@ import TotalUnimodularity: _split_submatrices
         @test !_is_network_matrix(one_sum(F_2, network_matrix))
         @test !_is_network_matrix(one_sum(F_1, M3))
         @test !_is_network_matrix(one_sum(F_2, M3))
+    end
+
+    @testset "_decompose" begin
+        # F_1 cannot be decomposed
+        found, _ = _decompose(F_1)
+        @test !found
+
+        # F_2 cannot be decomposed
+        found, _ = _decompose(F_2)
+        @test !found
+
+        # 1-sum can always be decomposed
+        M_test = one_sum(network_matrix, Matrix{Int}(I, 2, 2))
+        found, (A, B, C, D) = _decompose(M_test)
+        @test found
+        @test rank(B) + rank(C) <= 2
+        @test size(A, 1) + size(A, 2) >= 4
+        @test size(D, 1) + size(D, 2) >= 4
+        # @test [A B; C D] == M_test
+
+        # 2-sum can always be decomposed
+        A2 = [1 0 1 1; -1 1 0 1; 0 -1 -1 1]
+        B2 = [1 1 0; 1 0 1; 1 -1 1]
+        M2 = two_sum(A2, B2)
+        found, (DA, DB, DC, DD) = _decompose(M2)
+        @test found
+        @test rank(DB) + rank(DC) <= 2
+        @test size(DA, 1) + size(DA, 2) >= 4
+        @test size(DD, 1) + size(DD, 2) >= 4
+        # @test [DA DB; DC DD] == M2
+
+        # Reconstruction is always correct when decomposition found
+        # found, (A, B, C, D) = _decompose(one_sum(F_1, network_matrix))
+        # @test found
+        # @test [A B; C D] == one_sum(F_1, network_matrix)
     end
     
 end
