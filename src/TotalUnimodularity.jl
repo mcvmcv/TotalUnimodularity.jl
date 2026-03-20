@@ -1051,14 +1051,56 @@ function is_totally_unimodular(M::Matrix{Int})::Bool
         return is_totally_unimodular(mat1) && is_totally_unimodular(mat2)
 
     elseif rB == 2 && rC == 0
-        error("Case 5 not yet implemented")
+        # Case 5: rank(B)=2, rank(C)=0
+        # Pivot on a nonzero entry of B to reduce to Case 4
+        pivot_pos = findfirst(!iszero, B)
+        pivot_pos === nothing && error("B has rank 2 but no nonzero entries")
+        pi, pj = pivot_pos[1], pivot_pos[2]
+
+        rA = size(A, 1)
+        cA = size(A, 2)
+
+        # Permute M_full so pivot entry is at (1,1)
+        row_order = [pi; [i for i in 1:rA if i != pi]; collect(rA+1:rA+size(D,1))]
+        col_order = [cA+pj; collect(1:cA); [cA+j for j in 1:size(B,2) if j != pj]]
+
+        M_full = [A B; zeros(Int,size(D,1),cA) D]
+        M_perm = M_full[row_order, col_order]
+
+        # Pivot on leading 1×1 submatrix and reduce
+        ok, M_prime = _reduce(pivot(M_perm, 1))
+        ok || return false
+
+        return is_totally_unimodular(M_prime)
 
     elseif rB == 0 && rC == 2
-        error("Case 6 not yet implemented")
+        # Case 6: symmetric to Case 5, pivot on nonzero entry of C
+        pivot_pos = findfirst(!iszero, C)
+        pivot_pos === nothing && error("C has rank 2 but no nonzero entries")
+        pi, pj = pivot_pos[1], pivot_pos[2]
+
+        rA = size(A, 1)
+        cA = size(A, 2)
+        rC_size = size(C, 1)
+        cD = size(D, 2)
+
+        # Permute M_full so pivot entry is at (1,1)
+        row_order = [rA+pi; collect(1:rA); [rA+i for i in 1:rC_size if i != pi]]
+        col_order = [pj; [j for j in 1:cA if j != pj]; collect(cA+1:cA+cD)]
+
+        M_full = [A zeros(Int,rA,cD); C D]
+        M_perm = M_full[row_order, col_order]
+
+        # Pivot on leading 1×1 submatrix and reduce
+        ok, M_prime = _reduce(pivot(M_perm, 1))
+        ok || return false
+
+        return is_totally_unimodular(M_prime)
 
     else
         error("Unexpected rank(B) + rank(C) = $(rB + rC)")
+    end 
+
     end
-end
 
 end # module TotalUnimodularity
