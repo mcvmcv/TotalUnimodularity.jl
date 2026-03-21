@@ -52,14 +52,8 @@ function _check_size(A::Matrix{Int})
     return r, c
 end
 
-# Return true if v is a standard basis vector, i.e. exactly one entry equal
-# to 1 and all others 0.
-_is_standard_basis_vector(v::AbstractVector) =
-    count(!iszero, v) == 1 && all(x -> x in (0, 1), v)
-
 # Return true if v is a standard basis vector or the zero vector.
-_is_trivial_vector(v::AbstractVector) =
-    iszero(v) || _is_standard_basis_vector(v)
+_is_trivial_vector(v::AbstractVector) = count(!iszero, v) <= 1
 
 # Drop all slices along `dim` that are trivial (zero or standard basis vectors).
 # dim=1 drops trivial rows; dim=2 drops trivial columns.
@@ -588,7 +582,7 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
             B = M[row_top,  col_right]
             C = M[row_bot,  col_left ]
             D = M[row_bot,  col_right]
-
+            
             # Check rank constraint
             rank(B) + rank(C) <= 2 || continue
 
@@ -767,24 +761,19 @@ If A4 = A[R_rows, K_cols] has a nonzero entry, ε equals that entry directly.
 # Reference
 Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.3, Case 4.
 """
-function _find_epsilon(A::Matrix{Int}, R_rows::Vector{Int}, K_cols::Vector{Int})
+function _find_epsilon(A::Matrix{Int}, R_rows::Vector{Int}, K_cols::Vector{Int})::Tuple{Bool, Int}
     m, n = size(A)
 
-    # Shortcut: if A4 has a nonzero entry, ε equals that entry
     A4 = A[R_rows, K_cols]
     nz = findfirst(!iszero, A4)
     if nz !== nothing
-        return A4[nz]
+        return (true, A4[nz])
     end
 
-    # Build bipartite graph G on rows and columns of A
-    # Row i → vertex i, col j → vertex m+j
-    # Edge (i, m+j) with weight A[i,j] for each nonzero entry
     sources = R_rows
     targets = m .+ K_cols
     target_set = Set(targets)
 
-    # BFS tracking parent and edge weight
     visited = Dict{Int, Union{Nothing, Tuple{Int,Int}}}()
     for s in sources
         visited[s] = nothing
@@ -797,7 +786,6 @@ function _find_epsilon(A::Matrix{Int}, R_rows::Vector{Int}, K_cols::Vector{Int})
         for i in 1:m, j in 1:n
             A[i, j] == 0 && continue
             r_v, c_v = i, m + j
-            # Follow edge in either direction
             next = v == r_v ? c_v : (v == c_v ? r_v : nothing)
             next === nothing && continue
             next in keys(visited) && continue
@@ -810,10 +798,8 @@ function _find_epsilon(A::Matrix{Int}, R_rows::Vector{Int}, K_cols::Vector{Int})
         end
     end
 
-    found_target === nothing && error(
-        "No path from R to K — should have been reduced to Case 2 or 3")
+    found_target === nothing && return (false, 0)
 
-    # Reconstruct path and sum edge weights
     delta = 0
     v = found_target
     while visited[v] !== nothing
@@ -823,10 +809,11 @@ function _find_epsilon(A::Matrix{Int}, R_rows::Vector{Int}, K_cols::Vector{Int})
     end
 
     mod4 = mod(delta, 4)
-    mod4 == 1 && return 1
-    mod4 == 3 && return -1  # ≡ -1 (mod 4)
+    mod4 == 1 && return (true, 1)
+    mod4 == 3 && return (true, -1)
     error("δ = $delta is even — path should have odd length")
 end
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Seymour decomposition operations
@@ -1007,6 +994,17 @@ function is_totally_unimodular(M::Matrix{Int})::Bool
         return is_totally_unimodular([A; g]) && is_totally_unimodular([f D])
 
     elseif rB == 1 && rC == 1
+        # Case 4 requires A and D to be non-degenerate
+        # Case 4: rank(B) = rank(C) = 1
+        # B = f_B ⊗ g_B, C = f_C ⊗ g_C
+        A_degenerate = any(i -> count(!iszero, A[i,:]) <= 1, 1:size(A,1)) ||
+                       any(j -> count(!iszero, A[:,j]) <= 1, 1:size(A,2)) ||
+                       _has_dependent_vectors(A)
+        D_degenerate = any(i -> count(!iszero, D[i,:]) <= 1, 1:size(D,1)) ||
+                       any(j -> count(!iszero, D[:,j]) <= 1, 1:size(D,2)) ||
+                       _has_dependent_vectors(D)
+        (A_degenerate || D_degenerate) && return false
+    
         f_B, g_B = _extract_rank1(B)
         f_C, g_C = _extract_rank1(C)
 
@@ -1014,39 +1012,68 @@ function is_totally_unimodular(M::Matrix{Int})::Bool
         C_cols    = findall(!iszero, g_C[1, :])
         notB_rows = [i for i in 1:size(A, 1) if i ∉ B_rows]
         notC_cols = [j for j in 1:size(A, 2) if j ∉ C_cols]
-        A1 = A[notB_rows, notC_cols]
-        A2 = A[notB_rows, C_cols   ]
-        A3 = A[B_rows,    notC_cols]
-        A4 = A[B_rows,    C_cols   ]
+
+        # Normalise A: scale B_rows by f_B to put B in standard form [0; 1_block]
+        A_norm = copy(A)
+        for i in B_rows
+            A_norm[i, :] *= f_B[i, 1]
+        end
 
         C_rows    = findall(!iszero, f_C[:, 1])
         B_cols    = findall(!iszero, g_B[1, :])
         notC_rows = [i for i in 1:size(D, 1) if i ∉ C_rows]
         notB_cols = [j for j in 1:size(D, 2) if j ∉ B_cols]
-        D1 = D[C_rows,    B_cols   ]
-        D2 = D[C_rows,    notB_cols]
-        D3 = D[notC_rows, B_cols   ]
-        D4 = D[notC_rows, notB_cols]
 
-        ε₁ = _find_epsilon(A, B_rows, C_cols)
-        ε₂ = _find_epsilon(D, C_rows, B_cols)
+        # Normalise D: scale C_rows by f_C to put C in standard form [0, 1_block]
+        D_norm = copy(D)
+        for i in C_rows
+            D_norm[i, :] *= f_C[i, 1]
+        end
 
-        nR    = length(B_rows)
-        nK    = length(C_cols)
-        nnotR = length(notB_rows)
-        nnotK = length(notC_cols)
-        nCR   = length(C_rows)
-        nBK   = length(B_cols)
+        # Partition normalised A
+        A1 = A_norm[notB_rows, notC_cols]
+        A2 = A_norm[notB_rows, C_cols   ]
+        A3 = A_norm[B_rows,    notC_cols]
+        A4 = A_norm[B_rows,    C_cols   ]
+
+        # Partition normalised D
+        D1 = D_norm[C_rows,    B_cols   ]
+        D2 = D_norm[C_rows,    notB_cols]
+        D3 = D_norm[notC_rows, B_cols   ]
+        D4 = D_norm[notC_rows, notB_cols]
+
+        # Find ε₁ from A_norm (R=B_rows, K=C_cols)
+        # Find ε₂ from D_norm (R=C_rows, K=B_cols)
+        ok1, ε₁ = _find_epsilon(A_norm, B_rows, C_cols)
+        ok2, ε₂ = _find_epsilon(D_norm, C_rows, B_cols)
+
+        # If no path exists, structure should reduce to Case 2 or 3
+        # (should not happen if _decompose is correct, handle defensively)
+        (ok1 && ok2) || return false
+
+        nR     = length(B_rows)
+        nK     = length(C_cols)
+        nnotR  = length(notB_rows)
+        nnotK  = length(notC_cols)
+        nCR    = length(C_rows)
+        nBK    = length(B_cols)
         nnotCR = length(notC_rows)
         nnotBK = length(notB_cols)
 
-        mat1 = [A1                  A2              zeros(Int,nnotR,1)  zeros(Int,nnotR,1)
-                A3                  A4              ones(Int,nR,1)      ones(Int,nR,1)
-                zeros(Int,1,nnotK)  ones(Int,1,nK)  0                   ε₂               ]
+        # Construct matrices from (31) and test both
+        # mat1 = [A1        A2        0_{nnotR×1}  0_{nnotR×1}]
+        #        [A3        A4        1_{nR×1}     1_{nR×1}   ]
+        #        [0_{1×nnotK} 1_{1×nK}  0            ε₂        ]
+        mat1 = [A1                  A2             zeros(Int,nnotR,1)  zeros(Int,nnotR,1)
+                A3                  A4             ones(Int,nR,1)      ones(Int,nR,1)
+                zeros(Int,1,nnotK)  ones(Int,1,nK) 0                   ε₂               ]
 
-        mat2 = [ε₁                    zeros(Int,1,nBK)      ones(Int,1,nnotBK)    0
-                ones(Int,nCR,1)       ones(Int,nCR,1)       D1                    D2
-                zeros(Int,nnotCR,1)   zeros(Int,nnotCR,1)   D3                    D4   ]
+        # mat2 = [ε₁         0_{1×nBK}      1_{1×nnotBK}    0         ]
+        #        [1_{nCR×1}  1_{nCR×1}      D1              D2        ]
+        #        [0_{nnotCR×1} 0_{nnotCR×1} D3              D4        ]
+        mat2 = [ε₁                   zeros(Int,1,nBK)      ones(Int,1,nnotBK)    0
+                ones(Int,nCR,1)      ones(Int,nCR,1)       D1                    D2
+                zeros(Int,nnotCR,1)  zeros(Int,nnotCR,1)   D3                    D4   ]
 
         return is_totally_unimodular(mat1) && is_totally_unimodular(mat2)
 

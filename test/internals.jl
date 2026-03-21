@@ -1,7 +1,7 @@
 using Random
 using Graphs
 
-import TotalUnimodularity: _is_standard_basis_vector, _is_trivial_vector,
+import TotalUnimodularity: _is_trivial_vector,
                             _is_special_matrix, _drop_trivial_vectors,
                             _reduce_trivial_vectors, _has_dependent_rows,
                             _has_dependent_cols, _has_dependent_vectors,
@@ -28,19 +28,11 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
 
 @testset "Internals" begin
 
-    @testset "_is_standard_basis_vector" begin
-        @test _is_standard_basis_vector([1, 0, 0])
-        @test _is_standard_basis_vector([0, 1, 0])
-        @test !_is_standard_basis_vector([2, 0, 0])
-        @test !_is_standard_basis_vector([0, 0, 0])
-        @test !_is_standard_basis_vector([1, 1, 0])
-    end
-
     @testset "_is_trivial_vector" begin
         @test _is_trivial_vector([0, 0, 0])
         @test _is_trivial_vector([1, 0, 0])
         @test !_is_trivial_vector([1, 1, 0])
-        @test !_is_trivial_vector([2, 0, 0])
+        @test _is_trivial_vector([0, -1, 0])        
     end
 
     @testset "_is_special_matrix" begin
@@ -352,13 +344,21 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
     end
 
     @testset "_find_epsilon" begin
-        # If A4 has a nonzero entry, ε equals that entry
         A = [1 0; 0 1]
-        @test _find_epsilon(A, [1], [1]) == 1
-        @test _find_epsilon(A, [2], [2]) == 1
+        ok, ε = _find_epsilon(A, [1], [1])
+        @test ok && ε == 1
+
+        ok, ε = _find_epsilon(A, [2], [2])
+        @test ok && ε == 1
 
         A2 = [1 0; 0 -1]
-        @test _find_epsilon(A2, [2], [2]) == -1
-    end    
+        ok, ε = _find_epsilon(A2, [2], [2])
+        @test ok && ε == -1
+
+        # No path case
+        A3 = [1 0; 0 1]
+        ok, _ = _find_epsilon(A3, [1], [2])
+        @test !ok
+    end
     
 end
