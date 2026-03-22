@@ -967,11 +967,20 @@ function naive_is_totally_unimodular(M::Matrix{Int})
 end
 
 function is_totally_unimodular(M::Matrix{Int})::Bool
+    _is_tu_recursive(M, 0, Set{Matrix{Int}}())
+end
+
+function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::Bool
+    depth > 100 && error("Maximum recursion depth exceeded")
+    
     ok, M = _reduce(M)
     ok || return false
-
-    size(M, 1) == 0 || size(M, 2) == 0 && return true
-
+    (size(M, 1) == 0 || size(M, 2) == 0) && return true
+    
+    # Cycle detection
+    M in seen && return false
+    push!(seen, copy(M))
+    
     _is_network_matrix(M) && return true
     _is_network_matrix(Matrix{Int}(M')) && return true
     _is_special_matrix(M) && return true
@@ -983,20 +992,19 @@ function is_totally_unimodular(M::Matrix{Int})::Bool
     rC = rank(C)
 
     if rB == 0 && rC == 0
-        return is_totally_unimodular(A) && is_totally_unimodular(D)
+        return _is_tu_recursive(A, depth+1, seen) && _is_tu_recursive(D, depth+1, seen)
 
     elseif rB == 1 && rC == 0
         f, g = _extract_rank1(B)
-        return is_totally_unimodular([A f]) && is_totally_unimodular([g; D])
+        return _is_tu_recursive([A f], depth+1, seen) &&
+               _is_tu_recursive([g; D], depth+1, seen)
 
     elseif rB == 0 && rC == 1
         f, g = _extract_rank1(C)
-        return is_totally_unimodular([A; g]) && is_totally_unimodular([f D])
+        return _is_tu_recursive([A; g], depth+1, seen) &&
+               _is_tu_recursive([f D], depth+1, seen)
 
     elseif rB == 1 && rC == 1
-        # Case 4 requires A and D to be non-degenerate
-        # Case 4: rank(B) = rank(C) = 1
-        # B = f_B ⊗ g_B, C = f_C ⊗ g_C
         A_degenerate = any(i -> count(!iszero, A[i,:]) <= 1, 1:size(A,1)) ||
                        any(j -> count(!iszero, A[:,j]) <= 1, 1:size(A,2)) ||
                        _has_dependent_vectors(A)
@@ -1004,53 +1012,36 @@ function is_totally_unimodular(M::Matrix{Int})::Bool
                        any(j -> count(!iszero, D[:,j]) <= 1, 1:size(D,2)) ||
                        _has_dependent_vectors(D)
         (A_degenerate || D_degenerate) && return false
-    
+
         f_B, g_B = _extract_rank1(B)
         f_C, g_C = _extract_rank1(C)
-
         B_rows    = findall(!iszero, f_B[:, 1])
         C_cols    = findall(!iszero, g_C[1, :])
         notB_rows = [i for i in 1:size(A, 1) if i ∉ B_rows]
         notC_cols = [j for j in 1:size(A, 2) if j ∉ C_cols]
-
-        # Normalise A: scale B_rows by f_B to put B in standard form [0; 1_block]
         A_norm = copy(A)
         for i in B_rows
             A_norm[i, :] *= f_B[i, 1]
         end
-
         C_rows    = findall(!iszero, f_C[:, 1])
         B_cols    = findall(!iszero, g_B[1, :])
         notC_rows = [i for i in 1:size(D, 1) if i ∉ C_rows]
         notB_cols = [j for j in 1:size(D, 2) if j ∉ B_cols]
-
-        # Normalise D: scale C_rows by f_C to put C in standard form [0, 1_block]
         D_norm = copy(D)
         for i in C_rows
             D_norm[i, :] *= f_C[i, 1]
         end
-
-        # Partition normalised A
         A1 = A_norm[notB_rows, notC_cols]
         A2 = A_norm[notB_rows, C_cols   ]
         A3 = A_norm[B_rows,    notC_cols]
         A4 = A_norm[B_rows,    C_cols   ]
-
-        # Partition normalised D
         D1 = D_norm[C_rows,    B_cols   ]
         D2 = D_norm[C_rows,    notB_cols]
         D3 = D_norm[notC_rows, B_cols   ]
         D4 = D_norm[notC_rows, notB_cols]
-
-        # Find ε₁ from A_norm (R=B_rows, K=C_cols)
-        # Find ε₂ from D_norm (R=C_rows, K=B_cols)
         ok1, ε₁ = _find_epsilon(A_norm, B_rows, C_cols)
         ok2, ε₂ = _find_epsilon(D_norm, C_rows, B_cols)
-
-        # If no path exists, structure should reduce to Case 2 or 3
-        # (should not happen if _decompose is correct, handle defensively)
         (ok1 && ok2) || return false
-
         nR     = length(B_rows)
         nK     = length(C_cols)
         nnotR  = length(notB_rows)
@@ -1059,75 +1050,49 @@ function is_totally_unimodular(M::Matrix{Int})::Bool
         nBK    = length(B_cols)
         nnotCR = length(notC_rows)
         nnotBK = length(notB_cols)
-
-        # Construct matrices from (31) and test both
-        # mat1 = [A1        A2        0_{nnotR×1}  0_{nnotR×1}]
-        #        [A3        A4        1_{nR×1}     1_{nR×1}   ]
-        #        [0_{1×nnotK} 1_{1×nK}  0            ε₂        ]
         mat1 = [A1                  A2             zeros(Int,nnotR,1)  zeros(Int,nnotR,1)
                 A3                  A4             ones(Int,nR,1)      ones(Int,nR,1)
                 zeros(Int,1,nnotK)  ones(Int,1,nK) 0                   ε₂               ]
-
-        # mat2 = [ε₁         0_{1×nBK}      1_{1×nnotBK}    0         ]
-        #        [1_{nCR×1}  1_{nCR×1}      D1              D2        ]
-        #        [0_{nnotCR×1} 0_{nnotCR×1} D3              D4        ]
         mat2 = [ε₁                   zeros(Int,1,nBK)      ones(Int,1,nnotBK)    0
                 ones(Int,nCR,1)      ones(Int,nCR,1)       D1                    D2
                 zeros(Int,nnotCR,1)  zeros(Int,nnotCR,1)   D3                    D4   ]
-
-        return is_totally_unimodular(mat1) && is_totally_unimodular(mat2)
+        return _is_tu_recursive(mat1, depth+1, seen) &&
+               _is_tu_recursive(mat2, depth+1, seen)
 
     elseif rB == 2 && rC == 0
-        # Case 5: rank(B)=2, rank(C)=0
-        # Pivot on a nonzero entry of B to reduce to Case 4
         pivot_pos = findfirst(!iszero, B)
         pivot_pos === nothing && error("B has rank 2 but no nonzero entries")
         pi, pj = pivot_pos[1], pivot_pos[2]
-
         rA = size(A, 1)
         cA = size(A, 2)
-
-        # Permute M_full so pivot entry is at (1,1)
         row_order = [pi; [i for i in 1:rA if i != pi]; collect(rA+1:rA+size(D,1))]
         col_order = [cA+pj; collect(1:cA); [cA+j for j in 1:size(B,2) if j != pj]]
-
         M_full = [A B; zeros(Int,size(D,1),cA) D]
         M_perm = M_full[row_order, col_order]
-
-        # Pivot on leading 1×1 submatrix and reduce
         ok, M_prime = _reduce(pivot(M_perm, 1))
         ok || return false
-
-        return is_totally_unimodular(M_prime)
+        return _is_tu_recursive(M_prime, depth+1, seen)
 
     elseif rB == 0 && rC == 2
-        # Case 6: symmetric to Case 5, pivot on nonzero entry of C
         pivot_pos = findfirst(!iszero, C)
         pivot_pos === nothing && error("C has rank 2 but no nonzero entries")
         pi, pj = pivot_pos[1], pivot_pos[2]
-
         rA = size(A, 1)
         cA = size(A, 2)
         rC_size = size(C, 1)
         cD = size(D, 2)
-
-        # Permute M_full so pivot entry is at (1,1)
         row_order = [rA+pi; collect(1:rA); [rA+i for i in 1:rC_size if i != pi]]
         col_order = [pj; [j for j in 1:cA if j != pj]; collect(cA+1:cA+cD)]
-
         M_full = [A zeros(Int,rA,cD); C D]
         M_perm = M_full[row_order, col_order]
-
-        # Pivot on leading 1×1 submatrix and reduce
         ok, M_prime = _reduce(pivot(M_perm, 1))
         ok || return false
-
-        return is_totally_unimodular(M_prime)
+        return _is_tu_recursive(M_prime, depth+1, seen)
 
     else
         error("Unexpected rank(B) + rank(C) = $(rB + rC)")
-    end 
-
     end
+end
+
 
 end # module TotalUnimodularity
