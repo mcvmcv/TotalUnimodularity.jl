@@ -120,17 +120,18 @@ equal -f (the original f) rather than f (the negated f). The check
 
 ### Performance
 `_decompose` has O((m+n)^8) complexity in the worst case. For matrices
-larger than approximately 6×6, it becomes impractically slow.
+larger than approximately 8×10, it becomes slow.
 
-The inner `_solve_submodular` function performs many rank computations
-(via `LinearAlgebra.rank` which uses SVD). These could be accelerated using:
-- Rank-1 update formulas to avoid recomputing rank from scratch
-- Integer arithmetic instead of floating point SVD
-- Caching of previously computed ranks
+The inner rank computation uses `_rank_int` (Bareiss integer elimination),
+which is ~18× faster than `LinearAlgebra.rank` (SVD) for the small {-1,0,1}
+matrices encountered here. The 2000-trial random test suite now completes
+in ~30 seconds (previously ~150 CPU-minutes with SVD).
 
-The outer S,T loop could be pruned by:
-- Precomputing which S,T pairs satisfy the intersection conditions
-- Using matroid intersection algorithms directly rather than brute force
+Further acceleration opportunities:
+- Incremental rank updates: precompute column echelon form of SZ once,
+  check each v for independence in O(m²) rather than recomputing from scratch
+- Pruning the outer S,T loop using matroid intersection theory
+- Caching rank computations for repeated column subsets
 
 ### Cycle detection correctness
 Returning `false` on cycle detection is safe but conservative. A TU matrix

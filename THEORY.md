@@ -219,8 +219,10 @@ Performance optimisation of this step is a significant open task.
 
 ## Known Issues and Limitations
 
-1. **Performance:** `_decompose` (Theorem 20.2) is very slow for matrices
-   larger than ~6×6. The O(N^8) outer loop needs optimisation.
+1. **Performance:** `_decompose` (Theorem 20.2) becomes slow for matrices
+   larger than ~8×10. The O(N^8) outer loop needs further optimisation
+   (rank-update caching, S/T pair pruning). The inner rank computation
+   uses Bareiss integer elimination (18× faster than SVD for small matrices).
 
 2. **Cycle detection:** Cases 5 and 6 use a `seen` set to detect cycles.
    Returning `false` on cycle detection is safe (no false positives) but

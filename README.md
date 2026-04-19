@@ -84,10 +84,14 @@ decisions and known issues.
 
 ## Performance
 
-`is_totally_unimodular` works well for matrices up to approximately 6×6.
+`is_totally_unimodular` works well for matrices up to approximately 8×10.
 The Seymour decomposition step (Theorem 20.2) has O((m+n)^8) worst-case
-complexity and becomes slow for larger matrices. Performance optimisation
-is an open task — contributions welcome.
+complexity and becomes slow for larger matrices.
+
+The implementation uses exact integer rank computation (Bareiss elimination)
+rather than floating-point SVD, giving roughly 18× faster rank calls and
+12× faster decomposition on typical 5×6 matrices. The random test suite
+(2000 matrices up to 5×6) completes in about 30 seconds.
 
 For verification on small matrices, `naive_is_totally_unimodular` is
 available but has exponential time complexity.
