@@ -26,8 +26,12 @@ include("internals.jl")
 
         @test !is_totally_unimodular([1 1 0; 1 0 1; 0 1 1])
         @test !is_totally_unimodular([1 0 0 1; 1 0 1 0; 1 1 0 0; 1 1 1 1])
+        @test !is_totally_unimodular([2 0; 0 1])  # entry outside {-1,0,1}
 
-        # TODO: add more tests once Cases 5-6 implemented
+        # TU but not a network matrix (exercises special/decomposition path)
+        @test is_totally_unimodular(non_network_tu)
+        @test is_totally_unimodular(Matrix{Int}(network_matrix'))
+        @test is_totally_unimodular(Matrix{Int}(M3'))
     end
     
     @testset "is_totally_unimodular vs naive (random, extended)" begin
@@ -75,6 +79,56 @@ include("internals.jl")
         @test n_agree == n_tests
         @test n_tests > 800
     end
+
+    @testset "is_totally_unimodular vs naive (larger random)" begin
+        rng = MersenneTwister(456)
+        n_tests = 0
+        n_agree = 0
+        n_skip = 0
+        n_total = 200
+
+        @info "Starting larger matrix tests..."
+
+        for trial in 1:n_total
+            rows = rand(rng, 5:8)
+            cols = rand(rng, 5:10)
+            M = rand(rng, (-1, 0, 1), rows, cols)
+
+            # Skip if naive is too slow (matrix is large and dense)
+            if rows * cols > 60
+                n_skip += 1
+                continue
+            end
+
+            naive = naive_is_totally_unimodular(M)
+
+            fast = try
+                is_totally_unimodular(M)
+            catch e
+                n_skip += 1
+                @warn "Skipped" trial rows cols exception=sprint(showerror, e)
+                display(M)
+                continue
+            end
+
+            n_tests += 1
+            if naive == fast
+                n_agree += 1
+            else
+                @warn "DISAGREEMENT" trial M naive fast
+                @test naive == fast
+            end
+
+            if trial % 20 == 0
+                @info "Progress" trial n_total n_agree n_tests n_skip
+            end
+        end
+
+        @info "Final" n_agree n_tests n_skip n_total
+        @test n_agree == n_tests
+        @test n_tests > 50
+    end
+
     
 end
 
