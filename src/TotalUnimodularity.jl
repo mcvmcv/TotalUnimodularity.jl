@@ -215,6 +215,37 @@ end
 _drop_dependent_vectors(M::Matrix{Int}) =
     _drop_dependent_cols(_drop_dependent_rows(M))
 
+# Integer rank via Bareiss elimination — exact, no BLAS, no Float64 conversion.
+# Significantly faster than LinearAlgebra.rank for small {-1,0,1} matrices.
+function _rank_int(A::AbstractMatrix{Int})::Int
+    m, n = size(A)
+    (m == 0 || n == 0) && return 0
+    B = Matrix{Int}(A)
+    prev = 1
+    r = 0
+    for col in 1:n
+        prow = 0
+        for row in r+1:m
+            iszero(B[row, col]) || (prow = row; break)
+        end
+        prow == 0 && continue
+        r += 1
+        if prow != r
+            for c in 1:n; B[r,c], B[prow,c] = B[prow,c], B[r,c]; end
+        end
+        for row in r+1:m
+            iszero(B[row, col]) && continue
+            for c in col+1:n
+                B[row, c] = (B[r, col] * B[row, c] - B[row, col] * B[r, c]) ÷ prev
+            end
+            B[row, col] = 0
+        end
+        prev = B[r, col]
+        r == m && break
+    end
+    r
+end
+
 """
     _reduce(M)
 
@@ -538,7 +569,7 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
     N = m + n                       # total columns of IM
     XI = Set(1:m)                   # column indices of I part
     XM = Set(m+1:m+n)              # column indices of M part
-    rhoX = rank(IM)
+    rhoX = _rank_int(IM)
 
     for S in combinations(1:N, 4)
         # S must intersect both XI and XM
@@ -584,7 +615,7 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
             D = M[row_bot,  col_right]
             
             # Check rank constraint
-            rank(B) + rank(C) <= 2 || continue
+            _rank_int(B) + _rank_int(C) <= 2 || continue
 
             return (true, (A, B, C, D))
         end
@@ -601,30 +632,31 @@ function _solve_submodular(IM::Matrix{Int}, S::Vector{Int},
     while true
         SZ = S ∪ Z
         TZ = T ∪ Z
-        rhoSZ = rank(IM[:, SZ])
-        rhoTZ = rank(IM[:, TZ])
+        rhoSZ = _rank_int(IM[:, SZ])
+        rhoTZ = _rank_int(IM[:, TZ])
 
         # Compute U and W from (19)
         U = [v for v in V if v ∉ Z &&
-             rank(IM[:, SZ ∪ [v]]) == rhoSZ + 1]
+             _rank_int(IM[:, SZ ∪ [v]]) == rhoSZ + 1]
         W = [v for v in V if v ∉ Z &&
-             rank(IM[:, TZ ∪ [v]]) == rhoTZ + 1]
+             _rank_int(IM[:, TZ ∪ [v]]) == rhoTZ + 1]
 
         # Build digraph D from (18)
         # For u∈Z, v∈V\Z:
         #   (u,v) ∈ E iff ρ(S∪(Z\{u})∪{v}) = ρ(S)+|Z|
         #   (v,u) ∈ E iff ρ(T∪(Z\{u})∪{v}) = ρ(T)+|Z|
         d_edges = Tuple{Int,Int}[]
-        rhoS = rank(IM[:, S])
-        rhoT = rank(IM[:, T])
+        # When Z=[], S∪Z=S so reuse already-computed rhoSZ/rhoTZ
+        rhoS = isempty(Z) ? rhoSZ : _rank_int(IM[:, S])
+        rhoT = isempty(Z) ? rhoTZ : _rank_int(IM[:, T])
         for u in Z
             Zminu = [z for z in Z if z != u]
             for v in V
                 v in Z && continue
-                if rank(IM[:, S ∪ Zminu ∪ [v]]) == rhoS + length(Z)
+                if _rank_int(IM[:, S ∪ Zminu ∪ [v]]) == rhoS + length(Z)
                     push!(d_edges, (u, v))
                 end
-                if rank(IM[:, T ∪ Zminu ∪ [v]]) == rhoT + length(Z)
+                if _rank_int(IM[:, T ∪ Zminu ∪ [v]]) == rhoT + length(Z)
                     push!(d_edges, (v, u))
                 end
             end
@@ -644,8 +676,8 @@ function _solve_submodular(IM::Matrix{Int}, S::Vector{Int},
 
             # Check ρ(Y) + ρ(X\Y) ≤ ρ(X) + 2
             XminusY = [v for v in 1:N if v ∉ Y]  # fixed: use full X\Y
-            rhoY = rank(IM[:, Y])
-            rhoXminusY = isempty(XminusY) ? 0 : rank(IM[:, XminusY])
+            rhoY = _rank_int(IM[:, Y])
+            rhoXminusY = isempty(XminusY) ? 0 : _rank_int(IM[:, XminusY])
 
             return (rhoY + rhoXminusY <= rhoX + 2, Y)
         end
@@ -988,8 +1020,8 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::B
     found, (A, B, C, D) = _decompose(M)
     found || return false
 
-    rB = rank(B)
-    rC = rank(C)
+    rB = _rank_int(B)
+    rC = _rank_int(C)
 
     if rB == 0 && rC == 0
         return _is_tu_recursive(A, depth+1, seen) && _is_tu_recursive(D, depth+1, seen)
