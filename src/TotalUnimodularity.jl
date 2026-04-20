@@ -293,15 +293,16 @@ end
 
 # Cached wrappers: same result as _rank_IM(M, m, mask) but avoids recomputing
 # when the same column set appears multiple times in the O(N^8) decompose loop.
-# Array version: O(1) direct index (N ≤ 20), ~10x faster lookup than Dict.
-@inline function _rank_IM_cached(cache::Vector{Int}, M::Matrix{Int}, m::Int, mask::UInt64)::Int
+# Int8 array: rank ≤ N ≤ 20, so rank+1 ≤ 21 fits in Int8. Using Int8 instead of
+# Int shrinks the hot working set from ~110KB to ~14KB, keeping it in L1 cache.
+@inline function _rank_IM_cached(cache::Vector{Int8}, M::Matrix{Int}, m::Int, mask::UInt64)::Int
     idx = Int(mask) + 1
     v = cache[idx]
-    if v == 0  # 0 = not yet computed; ranks are stored as rank+1
-        v = _rank_IM(M, m, mask) + 1
+    if v == 0  # 0 = not yet computed; ranks stored as rank+1
+        v = Int8(_rank_IM(M, m, mask) + 1)
         cache[idx] = v
     end
-    v - 1
+    Int(v) - 1
 end
 @inline function _rank_IM_cached(cache::Dict{UInt64,Int}, M::Matrix{Int}, m::Int, mask::UInt64)::Int
     v = get(cache, mask, -1)
@@ -710,7 +711,7 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
     slow_prev = Vector{Int}(undef, N)
     slow_bfsq = Vector{Int}(undef, N)
     if N <= 20
-        return _decompose_loop(M, m, n, rhoX, valid_masks, zeros(Int, 1 << N),
+        return _decompose_loop(M, m, n, rhoX, valid_masks, zeros(Int8, 1 << N),
                                slow_dbuf, slow_prev, slow_bfsq)
     else
         return _decompose_loop(M, m, n, rhoX, valid_masks, Dict{UInt64, Int}(),
@@ -781,15 +782,15 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
     Z_mask = UInt64(0)
 
     # First iteration fast path: Z=∅ means no edges exist.
-    # All bitmask operations — zero allocations in the most common case.
+    # Iterate only over active bits (V\(S∪T)) to avoid skip-checks for all N.
     let
         rhoSZ = rk(S_mask)
         rhoTZ = rk(T_mask)
-        U_mask = UInt64(0)
-        W_mask = UInt64(0)
-        for v in 1:N
-            (ST_mask >> (v - 1)) & 1 == 1 && continue
-            vbit = UInt64(1) << (v - 1)
+        U_mask = UInt64(0); W_mask = UInt64(0)
+        vbits = all_mask & ~ST_mask  # V \ (S∪T)
+        vb = vbits
+        while !iszero(vb)
+            vbit = vb & -vb; vb &= vb - 1  # pop lowest set bit
             rk(S_mask | vbit) == rhoSZ + 1 && (U_mask |= vbit)
             rk(T_mask | vbit) == rhoTZ + 1 && (W_mask |= vbit)
         end
@@ -809,32 +810,39 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
         rhoSZ = rk(SZ_mask)
         rhoTZ = rk(TZ_mask)
 
-        # U_mask, W_mask: V\(S∪T∪Z) elements extending S∪Z / T∪Z independently
+        # Iterate only over V\(S∪T∪Z) — avoids N skip-checks per active element
         U_mask = UInt64(0); W_mask = UInt64(0)
-        for v in 1:N
-            (ST_mask >> (v - 1)) & 1 == 1 && continue
-            (Z_mask  >> (v - 1)) & 1 == 1 && continue
-            vbit = UInt64(1) << (v - 1)
-            rk(SZ_mask | vbit) == rhoSZ + 1 && (U_mask |= vbit)
-            rk(TZ_mask | vbit) == rhoTZ + 1 && (W_mask |= vbit)
+        let vb = all_mask & ~ST_mask & ~Z_mask
+            while !iszero(vb)
+                vbit = vb & -vb; vb &= vb - 1
+                rk(SZ_mask | vbit) == rhoSZ + 1 && (U_mask |= vbit)
+                rk(TZ_mask | vbit) == rhoTZ + 1 && (W_mask |= vbit)
+            end
         end
 
-        # Build digraph D into pre-allocated buffer (no per-iteration allocation)
+        # Build digraph D: iterate over Z bits and V\(S∪T∪Z) bits directly
         n_de = 0
         rhoS = rk(S_mask); rhoT = rk(T_mask); rhoZ = count_ones(Z_mask)
-        for u_bit in 0:N-1
-            (Z_mask >> u_bit) & 1 == 0 && continue
-            u = u_bit + 1
-            Zminu_mask = Z_mask & ~(UInt64(1) << u_bit)
-            for v in 1:N
-                (ST_mask >> (v - 1)) & 1 == 1 && continue
-                (Z_mask  >> (v - 1)) & 1 == 1 && continue
-                vbit = UInt64(1) << (v - 1)
-                if rk(S_mask | Zminu_mask | vbit) == rhoS + rhoZ
-                    n_de += 1; d_buf[n_de] = (u, v)
-                end
-                if rk(T_mask | Zminu_mask | vbit) == rhoT + rhoZ
-                    n_de += 1; d_buf[n_de] = (v, u)
+        VnotSTZ = all_mask & ~ST_mask & ~Z_mask
+        let zb = Z_mask
+            while !iszero(zb)
+                u_lsb = zb & -zb; zb &= zb - 1  # pop lowest Z-bit
+                u = trailing_zeros(u_lsb) + 1
+                Zminu_mask = Z_mask & ~u_lsb
+                SZminu = S_mask | Zminu_mask
+                TZminu = T_mask | Zminu_mask
+                rhoSZ_target = rhoS + rhoZ
+                rhoTZ_target = rhoT + rhoZ
+                let vb = VnotSTZ
+                    while !iszero(vb)
+                        vbit = vb & -vb; vb &= vb - 1
+                        if rk(SZminu | vbit) == rhoSZ_target
+                            n_de += 1; d_buf[n_de] = (u, trailing_zeros(vbit) + 1)
+                        end
+                        if rk(TZminu | vbit) == rhoTZ_target
+                            n_de += 1; d_buf[n_de] = (trailing_zeros(vbit) + 1, u)
+                        end
+                    end
                 end
             end
         end
