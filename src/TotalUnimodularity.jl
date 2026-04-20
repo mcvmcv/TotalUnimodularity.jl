@@ -215,12 +215,10 @@ end
 _drop_dependent_vectors(M::Matrix{Int}) =
     _drop_dependent_cols(_drop_dependent_rows(M))
 
-# Integer rank via Bareiss elimination — exact, no BLAS, no Float64 conversion.
-# Significantly faster than LinearAlgebra.rank for small {-1,0,1} matrices.
-function _rank_int(A::AbstractMatrix{Int})::Int
-    m, n = size(A)
+# Integer rank via Bareiss elimination — in-place, destroys B.
+function _rank_int!(B::Matrix{Int})::Int
+    m, n = size(B)
     (m == 0 || n == 0) && return 0
-    B = Matrix{Int}(A)
     prev = 1
     r = 0
     for col in 1:n
@@ -234,9 +232,9 @@ function _rank_int(A::AbstractMatrix{Int})::Int
             for c in 1:n; B[r,c], B[prow,c] = B[prow,c], B[r,c]; end
         end
         for row in r+1:m
-            iszero(B[row, col]) && continue
+            factor = B[row, col]
             for c in col+1:n
-                B[row, c] = (B[r, col] * B[row, c] - B[row, col] * B[r, c]) ÷ prev
+                B[row, c] = (B[r, col] * B[row, c] - factor * B[r, c]) ÷ prev
             end
             B[row, col] = 0
         end
@@ -244,6 +242,78 @@ function _rank_int(A::AbstractMatrix{Int})::Int
         r == m && break
     end
     r
+end
+
+# Integer rank via Bareiss elimination — exact, no BLAS, no Float64 conversion.
+# Significantly faster than LinearAlgebra.rank for small {-1,0,1} matrices.
+_rank_int(A::AbstractMatrix{Int})::Int = (size(A,1)==0 || size(A,2)==0) ? 0 : _rank_int!(Matrix{Int}(A))
+
+# Compute rank(IM[:, cols]) where IM = [I_m | M], exploiting the identity block:
+#   rank([I_m | M][:, cols]) = |I_cols| + rank(M[not_I_rows, M_cols])
+# Uses a UInt64 bitmask for covered rows — one heap allocation (the submatrix).
+function _rank_IM(M::Matrix{Int}, m::Int, cols::AbstractVector{Int})::Int
+    isempty(cols) && return 0
+    n_I = 0
+    n_M = 0
+    covered = zero(UInt64)
+    for c in cols
+        if c <= m
+            n_I += 1
+            covered |= UInt64(1) << (c - 1)
+        else
+            n_M += 1
+        end
+    end
+    n_M == 0 && return n_I
+    n_notI = m - n_I
+    n_notI == 0 && return m
+    B = Matrix{Int}(undef, n_notI, n_M)
+    row = 0
+    for i in 1:m
+        (covered >> (i - 1)) & 1 == 1 && continue
+        row += 1
+        col = 0
+        for c in cols
+            c <= m && continue
+            col += 1
+            B[row, col] = M[i, c - m]
+        end
+    end
+    n_I + _rank_int!(B)
+end
+
+# Bitmask version — avoids vector argument allocation entirely.
+# mask bit k-1 set means column k of [I_m | M] is included.
+function _rank_IM(M::Matrix{Int}, m::Int, mask::UInt64)::Int
+    iszero(mask) && return 0
+    n = size(M, 2)
+    n_I = 0
+    covered = zero(UInt64)
+    for c in 1:m
+        (mask >> (c - 1)) & 1 == 0 && continue
+        n_I += 1
+        covered |= UInt64(1) << (c - 1)
+    end
+    n_M = 0
+    for c in m+1:m+n
+        (mask >> (c - 1)) & 1 == 1 && (n_M += 1)
+    end
+    n_M == 0 && return n_I
+    n_notI = m - n_I
+    n_notI == 0 && return m
+    B = Matrix{Int}(undef, n_notI, n_M)
+    row = 0
+    for i in 1:m
+        (covered >> (i - 1)) & 1 == 1 && continue
+        row += 1
+        col = 0
+        for c in m+1:m+n
+            (mask >> (c - 1)) & 1 == 0 && continue
+            col += 1
+            B[row, col] = M[i, c - m]
+        end
+    end
+    n_I + _rank_int!(B)
 end
 
 """
@@ -565,38 +635,33 @@ Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.2.
 """
 function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
     m, n = size(M)
-    IM = [Matrix{Int}(I, m, m) M]  # [I | M]
-    N = m + n                       # total columns of IM
-    XI = Set(1:m)                   # column indices of I part
-    XM = Set(m+1:m+n)              # column indices of M part
-    rhoX = _rank_int(IM)
+    N = m + n    # total columns of [I | M]; I-cols: 1:m, M-cols: m+1:N
+    rhoX = m     # rank([I | M]) = m always
 
-    for S in combinations(1:N, 4)
-        # S must intersect both XI and XM
-        any(s -> s in XI, S) || continue
-        any(s -> s in XM, S) || continue
-        S_set = Set(S)
+    # Precompute valid 4-element subset bitmasks (must intersect both I-cols and M-cols).
+    valid_masks = UInt64[]
+    for s in combinations(1:N, 4)
+        any(x -> x <= m, s) || continue
+        any(x -> x > m, s)  || continue
+        mask = UInt64(0)
+        for x in s; mask |= UInt64(1) << (x - 1); end
+        push!(valid_masks, mask)
+    end
 
-        for T in combinations(1:N, 4)
-            # T must intersect both XI and XM
-            any(t -> t in XI, T) || continue
-            any(t -> t in XM, T) || continue
-
+    @inbounds for S_mask in valid_masks
+        @inbounds for T_mask in valid_masks
             # S and T must be disjoint
-            isempty(S_set ∩ Set(T)) || continue
+            S_mask & T_mask != 0 && continue
 
-            # Solve problem (16)
-            found, Y = _solve_submodular(IM, collect(S), collect(T), rhoX)
+            # Solve problem (16) — returns Y as a bitmask
+            found, Y_mask = _solve_submodular(M, m, S_mask, T_mask, rhoX)
             found || continue
 
-            Y_set = Set(Y)
-
-            # Y∩XI → row indices that go to top partition (A, B rows)
-            # Y∩XM → col indices that go to left partition (A, C cols)
-            row_top  = sort([s       for s in Y if s in XI])
-            col_left = sort([s - m   for s in Y if s in XM])
-            row_bot  = sort([i       for i in 1:m if i ∉ Y_set])
-            col_right = sort([j      for j in 1:n if (j + m) ∉ Y_set])
+            # Y∩I-cols → row indices for top partition; Y∩M-cols → col indices for left partition
+            row_top   = [i for i in 1:m if (Y_mask >> (i-1))   & 1 == 1]
+            col_left  = [j for j in 1:n if (Y_mask >> (m+j-1)) & 1 == 1]
+            row_bot   = [i for i in 1:m if (Y_mask >> (i-1))   & 1 == 0]
+            col_right = [j for j in 1:n if (Y_mask >> (m+j-1)) & 1 == 0]
 
             # Size constraints: A and D must have r + c ≥ 4
             length(row_top)  + length(col_left)  >= 4 || continue
@@ -623,63 +688,75 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
     return (false, (M, M, M, M))
 end
 
-function _solve_submodular(IM::Matrix{Int}, S::Vector{Int},
-                            T::Vector{Int}, rhoX::Int)::Tuple{Bool, Vector{Int}}
-    N = size(IM, 2)
-    V = [v for v in 1:N if v ∉ S && v ∉ T]  # V = X\(S∪T)
-    Z = Int[]  # start with Z = ∅
+# All column sets are represented as UInt64 bitmasks throughout, eliminating
+# the vector-union allocations (S∪Z, SZ∪[v], S∪Zminu∪[v], etc.) that previously
+# dominated the allocation count in the O(N^8) outer loop.
+function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
+                            T_mask::UInt64, rhoX::Int)::Tuple{Bool, UInt64}
+    N = m + size(M, 2)
+    all_mask = N < 64 ? (UInt64(1) << N) - UInt64(1) : typemax(UInt64)
+    ST_mask = S_mask | T_mask
+    V = [v for v in 1:N if (ST_mask >> (v - 1)) & 1 == 0]  # V = X \ (S∪T)
+    Z_mask = UInt64(0)
 
     while true
-        SZ = S ∪ Z
-        TZ = T ∪ Z
-        rhoSZ = _rank_int(IM[:, SZ])
-        rhoTZ = _rank_int(IM[:, TZ])
+        SZ_mask = S_mask | Z_mask
+        TZ_mask = T_mask | Z_mask
+        rhoSZ = _rank_IM(M, m, SZ_mask)
+        rhoTZ = _rank_IM(M, m, TZ_mask)
 
-        # Compute U and W from (19)
-        U = [v for v in V if v ∉ Z &&
-             _rank_int(IM[:, SZ ∪ [v]]) == rhoSZ + 1]
-        W = [v for v in V if v ∉ Z &&
-             _rank_int(IM[:, TZ ∪ [v]]) == rhoTZ + 1]
+        # Compute U and W: elements of V\Z that extend S∪Z / T∪Z independently
+        U = Int[]
+        W = Int[]
+        for v in V
+            (Z_mask >> (v - 1)) & 1 == 1 && continue
+            vbit = UInt64(1) << (v - 1)
+            _rank_IM(M, m, SZ_mask | vbit) == rhoSZ + 1 && push!(U, v)
+            _rank_IM(M, m, TZ_mask | vbit) == rhoTZ + 1 && push!(W, v)
+        end
 
-        # Build digraph D from (18)
-        # For u∈Z, v∈V\Z:
-        #   (u,v) ∈ E iff ρ(S∪(Z\{u})∪{v}) = ρ(S)+|Z|
-        #   (v,u) ∈ E iff ρ(T∪(Z\{u})∪{v}) = ρ(T)+|Z|
+        # Build digraph D from (18):
+        #   (u,v): u∈Z, v∈V\Z, ρ(S∪(Z\{u})∪{v}) = ρ(S)+|Z|
+        #   (v,u): v∈V\Z, u∈Z, ρ(T∪(Z\{u})∪{v}) = ρ(T)+|Z|
         d_edges = Tuple{Int,Int}[]
-        # When Z=[], S∪Z=S so reuse already-computed rhoSZ/rhoTZ
-        rhoS = isempty(Z) ? rhoSZ : _rank_int(IM[:, S])
-        rhoT = isempty(Z) ? rhoTZ : _rank_int(IM[:, T])
-        for u in Z
-            Zminu = [z for z in Z if z != u]
+        rhoS = iszero(Z_mask) ? rhoSZ : _rank_IM(M, m, S_mask)
+        rhoT = iszero(Z_mask) ? rhoTZ : _rank_IM(M, m, T_mask)
+        rhoZ = count_ones(Z_mask)
+        for u_bit in 0:N-1
+            (Z_mask >> u_bit) & 1 == 0 && continue
+            u = u_bit + 1
+            Zminu_mask = Z_mask & ~(UInt64(1) << u_bit)
             for v in V
-                v in Z && continue
-                if _rank_int(IM[:, S ∪ Zminu ∪ [v]]) == rhoS + length(Z)
+                (Z_mask >> (v - 1)) & 1 == 1 && continue
+                vbit = UInt64(1) << (v - 1)
+                if _rank_IM(M, m, S_mask | Zminu_mask | vbit) == rhoS + rhoZ
                     push!(d_edges, (u, v))
                 end
-                if _rank_int(IM[:, T ∪ Zminu ∪ [v]]) == rhoT + length(Z)
+                if _rank_IM(M, m, T_mask | Zminu_mask | vbit) == rhoT + rhoZ
                     push!(d_edges, (v, u))
                 end
             end
         end
 
-        # Find shortest path from U to W in D
         path = _shortest_path(d_edges, U, W, V)
 
         if path !== nothing
-            # Case 1: update Z via symmetric difference (20)
-            path_set = Set(path)
-            Z = [v for v in V if (v in Z) ⊻ (v in path_set)]
+            # Update Z via symmetric difference with path (20)
+            path_mask = UInt64(0)
+            for p in path; path_mask |= UInt64(1) << (p - 1); end
+            Z_mask = Z_mask ⊻ path_mask
         else
-            # Case 2: Y = S ∪ {v ∈ V | path from v to W exists in D} (23)
+            # Y = S ∪ {v ∈ V | v can reach W in D} (23)
             reachable = _reachable_to(d_edges, W, V)
-            Y = sort(S ∪ reachable)  # fixed: no explicit ∪ Z
+            reach_mask = UInt64(0)
+            for r in reachable; reach_mask |= UInt64(1) << (r - 1); end
+            Y_mask = S_mask | reach_mask
 
-            # Check ρ(Y) + ρ(X\Y) ≤ ρ(X) + 2
-            XminusY = [v for v in 1:N if v ∉ Y]  # fixed: use full X\Y
-            rhoY = _rank_int(IM[:, Y])
-            rhoXminusY = isempty(XminusY) ? 0 : _rank_int(IM[:, XminusY])
+            XminusY_mask = all_mask & ~Y_mask
+            rhoY       = _rank_IM(M, m, Y_mask)
+            rhoXminusY = iszero(XminusY_mask) ? 0 : _rank_IM(M, m, XminusY_mask)
 
-            return (rhoY + rhoXminusY <= rhoX + 2, Y)
+            return (rhoY + rhoXminusY <= rhoX + 2, Y_mask)
         end
     end
 end
