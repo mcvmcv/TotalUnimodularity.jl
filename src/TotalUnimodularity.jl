@@ -291,8 +291,18 @@ function _rank_IM(M::Matrix{Int}, m::Int, cols::AbstractVector{Int})::Int
     n_I + _rank_int!(B)
 end
 
-# Cached wrapper: same result as _rank_IM(M, m, mask) but avoids recomputing
+# Cached wrappers: same result as _rank_IM(M, m, mask) but avoids recomputing
 # when the same column set appears multiple times in the O(N^8) decompose loop.
+# Array version: O(1) direct index (N ≤ 20), ~10x faster lookup than Dict.
+@inline function _rank_IM_cached(cache::Vector{Int}, M::Matrix{Int}, m::Int, mask::UInt64)::Int
+    idx = Int(mask) + 1
+    v = cache[idx]
+    if v == -1
+        v = _rank_IM(M, m, mask)
+        cache[idx] = v
+    end
+    v
+end
 @inline function _rank_IM_cached(cache::Dict{UInt64,Int}, M::Matrix{Int}, m::Int, mask::UInt64)::Int
     v = get(cache, mask, -1)
     if v == -1
@@ -658,10 +668,6 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
     N = m + n    # total columns of [I | M]; I-cols: 1:m, M-cols: m+1:N
     rhoX = m     # rank([I | M]) = m always
 
-    # Shared rank cache: the same column-subset rank is queried many times across
-    # different (S,T) pairs in the O(N^8) loop. Caching eliminates redundant Bareiss.
-    rank_cache = Dict{UInt64, Int}()
-
     # Precompute valid 4-element subset bitmasks (must intersect both I-cols and M-cols).
     valid_masks = UInt64[]
     for s in combinations(1:N, 4)
@@ -672,13 +678,24 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
         push!(valid_masks, mask)
     end
 
+    # Function barrier: ensures Julia compiles monomorphic code for each cache type.
+    # Array cache (N ≤ 20): O(1) direct-indexed lookup, ~10x faster than Dict.
+    if N <= 20
+        return _decompose_loop(M, m, n, rhoX, valid_masks, fill(-1, 1 << N))
+    else
+        return _decompose_loop(M, m, n, rhoX, valid_masks, Dict{UInt64, Int}())
+    end
+end
+
+function _decompose_loop(M::Matrix{Int}, m::Int, n::Int, rhoX::Int,
+                          valid_masks::Vector{UInt64}, cache)::Tuple{Bool, NTuple{4, Matrix{Int}}}
     @inbounds for S_mask in valid_masks
         @inbounds for T_mask in valid_masks
             # S and T must be disjoint
             S_mask & T_mask != 0 && continue
 
             # Solve problem (16) — returns Y as a bitmask
-            found, Y_mask = _solve_submodular(M, m, S_mask, T_mask, rhoX, rank_cache)
+            found, Y_mask = _solve_submodular(M, m, S_mask, T_mask, rhoX, cache)
             found || continue
 
             # Y∩I-cols → row indices for top partition; Y∩M-cols → col indices for left partition
@@ -697,14 +714,13 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
             isempty(col_left) && continue
             isempty(col_right) && continue
 
-            # Extract submatrices
+            # Extract submatrices.
+            # Note: rank(B)+rank(C) = rhoY+rhoXminusY-m ≤ 2 is already guaranteed
+            # by found=true from _solve_submodular, so no extra rank check needed.
             A = M[row_top,  col_left ]
             B = M[row_top,  col_right]
             C = M[row_bot,  col_left ]
             D = M[row_bot,  col_right]
-            
-            # Check rank constraint
-            _rank_int(B) + _rank_int(C) <= 2 || continue
 
             return (true, (A, B, C, D))
         end
@@ -718,15 +734,38 @@ end
 # rank_cache is shared across all (S,T) pairs in _decompose — the same column-
 # subset rank is queried many times, so caching eliminates redundant Bareiss runs.
 function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
-                            T_mask::UInt64, rhoX::Int,
-                            cache::Dict{UInt64,Int})::Tuple{Bool, UInt64}
+                            T_mask::UInt64, rhoX::Int, cache)::Tuple{Bool, UInt64}
     rk(mask) = _rank_IM_cached(cache, M, m, mask)
 
     N = m + size(M, 2)
     all_mask = N < 64 ? (UInt64(1) << N) - UInt64(1) : typemax(UInt64)
     ST_mask = S_mask | T_mask
-    V = [v for v in 1:N if (ST_mask >> (v - 1)) & 1 == 0]  # V = X \ (S∪T)
+    # V = X \ (S∪T): iterate inline over 1:N with bit test to avoid allocating a vector.
     Z_mask = UInt64(0)
+
+    # First iteration fast path: Z=∅ means no edges exist.
+    # _shortest_path reduces to a U∩W check; _reachable_to returns empty.
+    # All bitmask operations — zero allocations in the most common case.
+    let
+        rhoSZ = rk(S_mask)
+        rhoTZ = rk(T_mask)
+        U_mask = UInt64(0)
+        W_mask = UInt64(0)
+        for v in 1:N
+            (ST_mask >> (v - 1)) & 1 == 1 && continue  # skip v ∈ S∪T
+            vbit = UInt64(1) << (v - 1)
+            rk(S_mask | vbit) == rhoSZ + 1 && (U_mask |= vbit)
+            rk(T_mask | vbit) == rhoTZ + 1 && (W_mask |= vbit)
+        end
+        UW = U_mask & W_mask
+        if !iszero(UW)
+            Z_mask = UW & -UW  # lowest set bit of U∩W → augmenting path of length 1
+        else
+            XminusY_mask = all_mask & ~S_mask
+            rhoXminusY = iszero(XminusY_mask) ? 0 : rk(XminusY_mask)
+            return (rhoSZ + rhoXminusY <= rhoX + 2, S_mask)
+        end
+    end
 
     while true
         SZ_mask = S_mask | Z_mask
@@ -737,8 +776,9 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
         # Compute U and W: elements of V\Z that extend S∪Z / T∪Z independently
         U = Int[]
         W = Int[]
-        for v in V
-            (Z_mask >> (v - 1)) & 1 == 1 && continue
+        for v in 1:N
+            (ST_mask >> (v - 1)) & 1 == 1 && continue  # skip v ∈ S∪T
+            (Z_mask >> (v - 1)) & 1 == 1 && continue   # skip v ∈ Z
             vbit = UInt64(1) << (v - 1)
             rk(SZ_mask | vbit) == rhoSZ + 1 && push!(U, v)
             rk(TZ_mask | vbit) == rhoTZ + 1 && push!(W, v)
@@ -748,14 +788,15 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
         #   (u,v): u∈Z, v∈V\Z, ρ(S∪(Z\{u})∪{v}) = ρ(S)+|Z|
         #   (v,u): v∈V\Z, u∈Z, ρ(T∪(Z\{u})∪{v}) = ρ(T)+|Z|
         d_edges = Tuple{Int,Int}[]
-        rhoS = iszero(Z_mask) ? rhoSZ : rk(S_mask)
-        rhoT = iszero(Z_mask) ? rhoTZ : rk(T_mask)
+        rhoS = rk(S_mask)
+        rhoT = rk(T_mask)
         rhoZ = count_ones(Z_mask)
         for u_bit in 0:N-1
             (Z_mask >> u_bit) & 1 == 0 && continue
             u = u_bit + 1
             Zminu_mask = Z_mask & ~(UInt64(1) << u_bit)
-            for v in V
+            for v in 1:N
+                (ST_mask >> (v - 1)) & 1 == 1 && continue
                 (Z_mask >> (v - 1)) & 1 == 1 && continue
                 vbit = UInt64(1) << (v - 1)
                 if rk(S_mask | Zminu_mask | vbit) == rhoS + rhoZ
@@ -767,22 +808,17 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
             end
         end
 
-        path = _shortest_path(d_edges, U, W, V)
+        path = _shortest_path(d_edges, U, W)
 
         if path !== nothing
-            # Update Z via symmetric difference with path (20)
             path_mask = UInt64(0)
             for p in path; path_mask |= UInt64(1) << (p - 1); end
             Z_mask = Z_mask ⊻ path_mask
         else
-            # Y = S ∪ {v ∈ V | v can reach W in D} (23)
-            reachable = _reachable_to(d_edges, W, V)
-            reach_mask = UInt64(0)
-            for r in reachable; reach_mask |= UInt64(1) << (r - 1); end
+            reach_mask = _reachable_to_mask(d_edges, W, ST_mask, N)
             Y_mask = S_mask | reach_mask
 
             XminusY_mask = all_mask & ~Y_mask
-            # Y = S when reachable is empty (common case) — reuse rhoSZ
             rhoY       = iszero(reach_mask) ? rhoSZ : rk(Y_mask)
             rhoXminusY = iszero(XminusY_mask) ? 0 : rk(XminusY_mask)
 
@@ -793,8 +829,7 @@ end
 
 function _shortest_path(edges::Vector{Tuple{Int,Int}},
                          sources::Vector{Int},
-                         targets::Vector{Int},
-                         vertices::Vector{Int})
+                         targets::Vector{Int})
     (isempty(sources) || isempty(targets)) && return nothing
     target_set = Set(targets)
 
@@ -833,26 +868,30 @@ function _reconstruct_path(prev::Dict{Int,Int}, sources::Set{Int},
     return path
 end
 
-function _reachable_to(edges::Vector{Tuple{Int,Int}},
-                        targets::Vector{Int},
-                        vertices::Vector{Int})
-    isempty(targets) && return Int[]
-    # Reverse the graph and BFS from targets
+# Returns a bitmask of V-elements (not in ST_mask) that can reach any target in
+# the reversed graph. Avoids creating an intermediate result vector.
+function _reachable_to_mask(edges::Vector{Tuple{Int,Int}},
+                             targets::Vector{Int},
+                             ST_mask::UInt64, N::Int)::UInt64
+    isempty(targets) && return UInt64(0)
     visited = Set{Int}(targets)
     queue = copy(targets)
-
     while !isempty(queue)
         v = popfirst!(queue)
         for (u, w) in edges
-            w == v || continue  # reversed: follow incoming edges
+            w == v || continue
             u in visited && continue
             push!(visited, u)
             push!(queue, u)
         end
     end
-
     target_set = Set(targets)
-    return [v for v in vertices if v in visited && v ∉ target_set]
+    mask = UInt64(0)
+    for v in visited
+        v in target_set && continue
+        (ST_mask >> (v - 1)) & 1 == 0 && (mask |= UInt64(1) << (v - 1))
+    end
+    mask
 end
 
 """
