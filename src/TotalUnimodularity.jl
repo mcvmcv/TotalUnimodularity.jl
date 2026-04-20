@@ -149,8 +149,17 @@ row/column permutations and ±1 row/column scalings.
 """
 function _is_special_matrix(M::Matrix{Int})
     size(M) == (5, 5) || return false
-    _is_sign_and_permutation_equivalent(M, F_1) ||
-    _is_sign_and_permutation_equivalent(M, F_2)
+    # The multiset of absolute row sums is invariant under sign/permutation equivalence.
+    # F_1 has profile [3,3,3,3,3]; F_2 has profile [3,3,3,3,5].
+    # This O(n) check rejects most non-equivalent matrices before the O(14400) loop.
+    row_abs_sums = sort(ntuple(i -> sum(abs, @view M[i,:]), 5))
+    if row_abs_sums == (3,3,3,3,3)
+        _is_sign_and_permutation_equivalent(M, F_1) && return true
+    end
+    if row_abs_sums == (3,3,3,3,5)
+        _is_sign_and_permutation_equivalent(M, F_2) && return true
+    end
+    return false
 end
 
 # Return true if any two rows of M are equal or negatives of each other.
@@ -280,6 +289,17 @@ function _rank_IM(M::Matrix{Int}, m::Int, cols::AbstractVector{Int})::Int
         end
     end
     n_I + _rank_int!(B)
+end
+
+# Cached wrapper: same result as _rank_IM(M, m, mask) but avoids recomputing
+# when the same column set appears multiple times in the O(N^8) decompose loop.
+@inline function _rank_IM_cached(cache::Dict{UInt64,Int}, M::Matrix{Int}, m::Int, mask::UInt64)::Int
+    v = get(cache, mask, -1)
+    if v == -1
+        v = _rank_IM(M, m, mask)
+        cache[mask] = v
+    end
+    v
 end
 
 # Bitmask version — avoids vector argument allocation entirely.
@@ -638,6 +658,10 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
     N = m + n    # total columns of [I | M]; I-cols: 1:m, M-cols: m+1:N
     rhoX = m     # rank([I | M]) = m always
 
+    # Shared rank cache: the same column-subset rank is queried many times across
+    # different (S,T) pairs in the O(N^8) loop. Caching eliminates redundant Bareiss.
+    rank_cache = Dict{UInt64, Int}()
+
     # Precompute valid 4-element subset bitmasks (must intersect both I-cols and M-cols).
     valid_masks = UInt64[]
     for s in combinations(1:N, 4)
@@ -654,7 +678,7 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
             S_mask & T_mask != 0 && continue
 
             # Solve problem (16) — returns Y as a bitmask
-            found, Y_mask = _solve_submodular(M, m, S_mask, T_mask, rhoX)
+            found, Y_mask = _solve_submodular(M, m, S_mask, T_mask, rhoX, rank_cache)
             found || continue
 
             # Y∩I-cols → row indices for top partition; Y∩M-cols → col indices for left partition
@@ -691,8 +715,13 @@ end
 # All column sets are represented as UInt64 bitmasks throughout, eliminating
 # the vector-union allocations (S∪Z, SZ∪[v], S∪Zminu∪[v], etc.) that previously
 # dominated the allocation count in the O(N^8) outer loop.
+# rank_cache is shared across all (S,T) pairs in _decompose — the same column-
+# subset rank is queried many times, so caching eliminates redundant Bareiss runs.
 function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
-                            T_mask::UInt64, rhoX::Int)::Tuple{Bool, UInt64}
+                            T_mask::UInt64, rhoX::Int,
+                            cache::Dict{UInt64,Int})::Tuple{Bool, UInt64}
+    rk(mask) = _rank_IM_cached(cache, M, m, mask)
+
     N = m + size(M, 2)
     all_mask = N < 64 ? (UInt64(1) << N) - UInt64(1) : typemax(UInt64)
     ST_mask = S_mask | T_mask
@@ -702,8 +731,8 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
     while true
         SZ_mask = S_mask | Z_mask
         TZ_mask = T_mask | Z_mask
-        rhoSZ = _rank_IM(M, m, SZ_mask)
-        rhoTZ = _rank_IM(M, m, TZ_mask)
+        rhoSZ = rk(SZ_mask)
+        rhoTZ = rk(TZ_mask)
 
         # Compute U and W: elements of V\Z that extend S∪Z / T∪Z independently
         U = Int[]
@@ -711,16 +740,16 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
         for v in V
             (Z_mask >> (v - 1)) & 1 == 1 && continue
             vbit = UInt64(1) << (v - 1)
-            _rank_IM(M, m, SZ_mask | vbit) == rhoSZ + 1 && push!(U, v)
-            _rank_IM(M, m, TZ_mask | vbit) == rhoTZ + 1 && push!(W, v)
+            rk(SZ_mask | vbit) == rhoSZ + 1 && push!(U, v)
+            rk(TZ_mask | vbit) == rhoTZ + 1 && push!(W, v)
         end
 
         # Build digraph D from (18):
         #   (u,v): u∈Z, v∈V\Z, ρ(S∪(Z\{u})∪{v}) = ρ(S)+|Z|
         #   (v,u): v∈V\Z, u∈Z, ρ(T∪(Z\{u})∪{v}) = ρ(T)+|Z|
         d_edges = Tuple{Int,Int}[]
-        rhoS = iszero(Z_mask) ? rhoSZ : _rank_IM(M, m, S_mask)
-        rhoT = iszero(Z_mask) ? rhoTZ : _rank_IM(M, m, T_mask)
+        rhoS = iszero(Z_mask) ? rhoSZ : rk(S_mask)
+        rhoT = iszero(Z_mask) ? rhoTZ : rk(T_mask)
         rhoZ = count_ones(Z_mask)
         for u_bit in 0:N-1
             (Z_mask >> u_bit) & 1 == 0 && continue
@@ -729,10 +758,10 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
             for v in V
                 (Z_mask >> (v - 1)) & 1 == 1 && continue
                 vbit = UInt64(1) << (v - 1)
-                if _rank_IM(M, m, S_mask | Zminu_mask | vbit) == rhoS + rhoZ
+                if rk(S_mask | Zminu_mask | vbit) == rhoS + rhoZ
                     push!(d_edges, (u, v))
                 end
-                if _rank_IM(M, m, T_mask | Zminu_mask | vbit) == rhoT + rhoZ
+                if rk(T_mask | Zminu_mask | vbit) == rhoT + rhoZ
                     push!(d_edges, (v, u))
                 end
             end
@@ -753,8 +782,9 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
             Y_mask = S_mask | reach_mask
 
             XminusY_mask = all_mask & ~Y_mask
-            rhoY       = _rank_IM(M, m, Y_mask)
-            rhoXminusY = iszero(XminusY_mask) ? 0 : _rank_IM(M, m, XminusY_mask)
+            # Y = S when reachable is empty (common case) — reuse rhoSZ
+            rhoY       = iszero(reach_mask) ? rhoSZ : rk(Y_mask)
+            rhoXminusY = iszero(XminusY_mask) ? 0 : rk(XminusY_mask)
 
             return (rhoY + rhoXminusY <= rhoX + 2, Y_mask)
         end
