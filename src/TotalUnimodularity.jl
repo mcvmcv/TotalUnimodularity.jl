@@ -297,11 +297,11 @@ end
 @inline function _rank_IM_cached(cache::Vector{Int}, M::Matrix{Int}, m::Int, mask::UInt64)::Int
     idx = Int(mask) + 1
     v = cache[idx]
-    if v == -1
-        v = _rank_IM(M, m, mask)
+    if v == 0  # 0 = not yet computed; ranks are stored as rank+1
+        v = _rank_IM(M, m, mask) + 1
         cache[idx] = v
     end
-    v
+    v - 1
 end
 @inline function _rank_IM_cached(cache::Dict{UInt64,Int}, M::Matrix{Int}, m::Int, mask::UInt64)::Int
     v = get(cache, mask, -1)
@@ -429,16 +429,38 @@ function _build_gi(M::Matrix{Int}, i::Int)
     return g, orig
 end
 
+# Simple BFS connected-components for a Graphs.SimpleGraph.
+# Avoids Graphs.jl's connected_components overhead (vect allocations) on small graphs.
+function _bfs_components(g::Graphs.SimpleGraph)
+    n = Graphs.nv(g)
+    visited = zeros(Bool, n)
+    comps = Vector{Int}[]
+    for start in 1:n
+        visited[start] && continue
+        comp = Int[start]
+        visited[start] = true
+        qi = 1
+        while qi <= length(comp)
+            v = comp[qi]; qi += 1
+            for w in Graphs.neighbors(g, v)
+                visited[w] && continue
+                visited[w] = true
+                push!(comp, w)
+            end
+        end
+        push!(comps, comp)
+    end
+    comps
+end
+
 # Find the first row index i for which G_i is disconnected.
 # Returns (i, graph, components, vertex_map) or nothing if all G_i are connected.
 function _find_disconnected_gi(M::Matrix{Int})
     m = size(M, 1)
     for i in 1:m
         g, orig = _build_gi(M, i)
-        if !Graphs.is_connected(g)
-            components = Graphs.connected_components(g)
-            return (i, g, components, orig)
-        end
+        comps = _bfs_components(g)
+        length(comps) > 1 && return (i, g, comps, orig)
     end
     return nothing
 end
@@ -680,22 +702,35 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
 
     # Function barrier: ensures Julia compiles monomorphic code for each cache type.
     # Array cache (N ≤ 20): O(1) direct-indexed lookup, ~10x faster than Dict.
+    # zeros is ~2.6x faster to allocate than fill(-1,...); we store rank+1 so
+    # that 0 means "not yet computed" (valid ranks are ≥ 0, stored as rank+1 ≥ 1).
+    # Slow-path buffers for _solve_submodular (hoisted here so they are allocated
+    # once per _decompose call rather than once per (S,T) pair).
+    slow_dbuf = Vector{Tuple{Int,Int}}(undef, 2 * N * N)
+    slow_prev = Vector{Int}(undef, N)
+    slow_bfsq = Vector{Int}(undef, N)
     if N <= 20
-        return _decompose_loop(M, m, n, rhoX, valid_masks, fill(-1, 1 << N))
+        return _decompose_loop(M, m, n, rhoX, valid_masks, zeros(Int, 1 << N),
+                               slow_dbuf, slow_prev, slow_bfsq)
     else
-        return _decompose_loop(M, m, n, rhoX, valid_masks, Dict{UInt64, Int}())
+        return _decompose_loop(M, m, n, rhoX, valid_masks, Dict{UInt64, Int}(),
+                               slow_dbuf, slow_prev, slow_bfsq)
     end
 end
 
 function _decompose_loop(M::Matrix{Int}, m::Int, n::Int, rhoX::Int,
-                          valid_masks::Vector{UInt64}, cache)::Tuple{Bool, NTuple{4, Matrix{Int}}}
+                          valid_masks::Vector{UInt64}, cache,
+                          slow_dbuf::Vector{Tuple{Int,Int}},
+                          slow_prev::Vector{Int},
+                          slow_bfsq::Vector{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
     @inbounds for S_mask in valid_masks
         @inbounds for T_mask in valid_masks
             # S and T must be disjoint
             S_mask & T_mask != 0 && continue
 
             # Solve problem (16) — returns Y as a bitmask
-            found, Y_mask = _solve_submodular(M, m, S_mask, T_mask, rhoX, cache)
+            found, Y_mask = _solve_submodular(M, m, S_mask, T_mask, rhoX, cache,
+                                              slow_dbuf, slow_prev, slow_bfsq)
             found || continue
 
             # Y∩I-cols → row indices for top partition; Y∩M-cols → col indices for left partition
@@ -734,17 +769,18 @@ end
 # rank_cache is shared across all (S,T) pairs in _decompose — the same column-
 # subset rank is queried many times, so caching eliminates redundant Bareiss runs.
 function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
-                            T_mask::UInt64, rhoX::Int, cache)::Tuple{Bool, UInt64}
+                            T_mask::UInt64, rhoX::Int, cache,
+                            d_buf::Vector{Tuple{Int,Int}},
+                            prev::Vector{Int},
+                            bfsq::Vector{Int})::Tuple{Bool, UInt64}
     rk(mask) = _rank_IM_cached(cache, M, m, mask)
 
     N = m + size(M, 2)
     all_mask = N < 64 ? (UInt64(1) << N) - UInt64(1) : typemax(UInt64)
     ST_mask = S_mask | T_mask
-    # V = X \ (S∪T): iterate inline over 1:N with bit test to avoid allocating a vector.
     Z_mask = UInt64(0)
 
     # First iteration fast path: Z=∅ means no edges exist.
-    # _shortest_path reduces to a U∩W check; _reachable_to returns empty.
     # All bitmask operations — zero allocations in the most common case.
     let
         rhoSZ = rk(S_mask)
@@ -752,14 +788,14 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
         U_mask = UInt64(0)
         W_mask = UInt64(0)
         for v in 1:N
-            (ST_mask >> (v - 1)) & 1 == 1 && continue  # skip v ∈ S∪T
+            (ST_mask >> (v - 1)) & 1 == 1 && continue
             vbit = UInt64(1) << (v - 1)
             rk(S_mask | vbit) == rhoSZ + 1 && (U_mask |= vbit)
             rk(T_mask | vbit) == rhoTZ + 1 && (W_mask |= vbit)
         end
         UW = U_mask & W_mask
         if !iszero(UW)
-            Z_mask = UW & -UW  # lowest set bit of U∩W → augmenting path of length 1
+            Z_mask = UW & -UW  # lowest set bit of U∩W → length-1 augmenting path
         else
             XminusY_mask = all_mask & ~S_mask
             rhoXminusY = iszero(XminusY_mask) ? 0 : rk(XminusY_mask)
@@ -773,49 +809,42 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
         rhoSZ = rk(SZ_mask)
         rhoTZ = rk(TZ_mask)
 
-        # Compute U and W: elements of V\Z that extend S∪Z / T∪Z independently
-        U = Int[]
-        W = Int[]
+        # U_mask, W_mask: V\(S∪T∪Z) elements extending S∪Z / T∪Z independently
+        U_mask = UInt64(0); W_mask = UInt64(0)
         for v in 1:N
-            (ST_mask >> (v - 1)) & 1 == 1 && continue  # skip v ∈ S∪T
-            (Z_mask >> (v - 1)) & 1 == 1 && continue   # skip v ∈ Z
+            (ST_mask >> (v - 1)) & 1 == 1 && continue
+            (Z_mask  >> (v - 1)) & 1 == 1 && continue
             vbit = UInt64(1) << (v - 1)
-            rk(SZ_mask | vbit) == rhoSZ + 1 && push!(U, v)
-            rk(TZ_mask | vbit) == rhoTZ + 1 && push!(W, v)
+            rk(SZ_mask | vbit) == rhoSZ + 1 && (U_mask |= vbit)
+            rk(TZ_mask | vbit) == rhoTZ + 1 && (W_mask |= vbit)
         end
 
-        # Build digraph D from (18):
-        #   (u,v): u∈Z, v∈V\Z, ρ(S∪(Z\{u})∪{v}) = ρ(S)+|Z|
-        #   (v,u): v∈V\Z, u∈Z, ρ(T∪(Z\{u})∪{v}) = ρ(T)+|Z|
-        d_edges = Tuple{Int,Int}[]
-        rhoS = rk(S_mask)
-        rhoT = rk(T_mask)
-        rhoZ = count_ones(Z_mask)
+        # Build digraph D into pre-allocated buffer (no per-iteration allocation)
+        n_de = 0
+        rhoS = rk(S_mask); rhoT = rk(T_mask); rhoZ = count_ones(Z_mask)
         for u_bit in 0:N-1
             (Z_mask >> u_bit) & 1 == 0 && continue
             u = u_bit + 1
             Zminu_mask = Z_mask & ~(UInt64(1) << u_bit)
             for v in 1:N
                 (ST_mask >> (v - 1)) & 1 == 1 && continue
-                (Z_mask >> (v - 1)) & 1 == 1 && continue
+                (Z_mask  >> (v - 1)) & 1 == 1 && continue
                 vbit = UInt64(1) << (v - 1)
                 if rk(S_mask | Zminu_mask | vbit) == rhoS + rhoZ
-                    push!(d_edges, (u, v))
+                    n_de += 1; d_buf[n_de] = (u, v)
                 end
                 if rk(T_mask | Zminu_mask | vbit) == rhoT + rhoZ
-                    push!(d_edges, (v, u))
+                    n_de += 1; d_buf[n_de] = (v, u)
                 end
             end
         end
 
-        path = _shortest_path(d_edges, U, W)
+        found, path_mask = _shortest_path_mask(d_buf, n_de, U_mask, W_mask, N, prev, bfsq)
 
-        if path !== nothing
-            path_mask = UInt64(0)
-            for p in path; path_mask |= UInt64(1) << (p - 1); end
+        if found
             Z_mask = Z_mask ⊻ path_mask
         else
-            reach_mask = _reachable_to_mask(d_edges, W, ST_mask, N)
+            reach_mask = _reachable_bitmask(d_buf, n_de, W_mask, ST_mask, N, bfsq)
             Y_mask = S_mask | reach_mask
 
             XminusY_mask = all_mask & ~Y_mask
@@ -827,71 +856,86 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
     end
 end
 
-function _shortest_path(edges::Vector{Tuple{Int,Int}},
-                         sources::Vector{Int},
-                         targets::Vector{Int})
-    (isempty(sources) || isempty(targets)) && return nothing
-    target_set = Set(targets)
+# BFS augmenting path using bitmasks + pre-allocated prev/queue arrays.
+# Returns (found, path_mask) where path_mask is the symmetric-difference to
+# apply to Z (all vertices on the augmenting path, including endpoints).
+function _shortest_path_mask(edges::Vector{Tuple{Int,Int}}, n_edges::Int,
+                               U_mask::UInt64, W_mask::UInt64, N::Int,
+                               prev::Vector{Int}, queue::Vector{Int})::Tuple{Bool, UInt64}
+    iszero(U_mask) && return (false, UInt64(0))
+    iszero(W_mask) && return (false, UInt64(0))
 
-    # Check if any source is already a target
-    for s in sources
-        s in target_set && return [s]
+    # Length-0 augmenting path: element in both U and W
+    UW = U_mask & W_mask
+    if !iszero(UW)
+        v = trailing_zeros(UW) + 1
+        return (true, UInt64(1) << (v - 1))
     end
 
-    # BFS
-    visited = Set{Int}(sources)
-    prev = Dict{Int,Int}()
-    queue = copy(sources)
+    # BFS: sources = U_mask, targets = W_mask
+    visited = U_mask
+    @inbounds for i in 1:N; prev[i] = 0; end
+    qhead = 1; qtail = 0
+    for b in 0:N-1
+        (U_mask >> b) & 1 == 1 || continue
+        qtail += 1; queue[qtail] = b + 1
+    end
 
-    while !isempty(queue)
-        v = popfirst!(queue)
-        for (u, w) in edges
+    while qhead <= qtail
+        v = queue[qhead]; qhead += 1
+        for ei in 1:n_edges
+            u, w = edges[ei]
             u == v || continue
-            w in visited && continue
-            push!(visited, w)
+            (visited >> (w - 1)) & 1 == 1 && continue
+            visited |= UInt64(1) << (w - 1)
             prev[w] = v
-            w in target_set && return _reconstruct_path(prev, Set(sources), w)
-            push!(queue, w)
+            if (W_mask >> (w - 1)) & 1 == 1
+                # Reconstruct path_mask (no allocation — just bitmask accumulation)
+                path_mask = UInt64(1) << (w - 1)
+                curr = w
+                while (U_mask >> (curr - 1)) & 1 == 0
+                    curr = prev[curr]
+                    path_mask |= UInt64(1) << (curr - 1)
+                end
+                return (true, path_mask)
+            end
+            qtail += 1; queue[qtail] = w
         end
     end
-    return nothing
+    return (false, UInt64(0))
 end
 
-function _reconstruct_path(prev::Dict{Int,Int}, sources::Set{Int},
-                            target::Int)
-    path = [target]
-    v = target
-    while v ∉ sources
-        v = prev[v]
-        pushfirst!(path, v)
+# BFS on reversed graph from W_mask; returns bitmask of reachable non-W elements.
+# queue buffer is passed in (reuse the bfsq from the caller — safe because
+# _shortest_path_mask has already returned false, so bfsq is unused).
+function _reachable_bitmask(edges::Vector{Tuple{Int,Int}}, n_edges::Int,
+                              W_mask::UInt64, ST_mask::UInt64, N::Int,
+                              queue::Vector{Int})::UInt64
+    iszero(W_mask) && return UInt64(0)
+    visited = W_mask
+    qhead = 1; qtail = 0
+    for b in 0:N-1
+        (W_mask >> b) & 1 == 1 || continue
+        qtail += 1; queue[qtail] = b + 1
     end
-    return path
-end
-
-# Returns a bitmask of V-elements (not in ST_mask) that can reach any target in
-# the reversed graph. Avoids creating an intermediate result vector.
-function _reachable_to_mask(edges::Vector{Tuple{Int,Int}},
-                             targets::Vector{Int},
-                             ST_mask::UInt64, N::Int)::UInt64
-    isempty(targets) && return UInt64(0)
-    visited = Set{Int}(targets)
-    queue = copy(targets)
-    while !isempty(queue)
-        v = popfirst!(queue)
-        for (u, w) in edges
+    while qhead <= qtail
+        v = queue[qhead]; qhead += 1
+        for ei in 1:n_edges
+            u, w = edges[ei]
             w == v || continue
-            u in visited && continue
-            push!(visited, u)
-            push!(queue, u)
+            (visited >> (u - 1)) & 1 == 1 && continue
+            visited |= UInt64(1) << (u - 1)
+            qtail += 1; queue[qtail] = u
         end
     end
-    target_set = Set(targets)
-    mask = UInt64(0)
-    for v in visited
-        v in target_set && continue
-        (ST_mask >> (v - 1)) & 1 == 0 && (mask |= UInt64(1) << (v - 1))
+    # Return visited \ W_mask, restricted to V \ ST_mask
+    extra = visited & ~W_mask
+    result = UInt64(0)
+    for b in 0:N-1
+        (extra >> b) & 1 == 0 && continue
+        (ST_mask >> b) & 1 == 0 && (result |= UInt64(1) << b)
     end
-    mask
+    result
 end
 
 """
