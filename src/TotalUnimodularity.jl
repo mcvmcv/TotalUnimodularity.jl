@@ -7,6 +7,7 @@ using Graphs
 # Public API
 export naive_is_totally_unimodular
 export is_totally_unimodular
+export cmr_is_totally_unimodular
 export one_sum, two_sum, three_sum
 export pivot
 export F_1, F_2
@@ -290,6 +291,44 @@ function _rank_float!(B::Matrix{Float64})::Int
     r
 end
 
+# Gaussian elimination on B[1..m, 1..n] — works on the leading m×n block of a
+# pre-allocated scratch buffer, so no heap allocation.
+function _rank_float_view!(B::Matrix{Float64}, m::Int, n::Int)::Int
+    r = 0
+    @inbounds for col in 1:n
+        prow = 0; best = 1e-10
+        for row in r+1:m
+            v = abs(B[row, col])
+            if v > best; best = v; prow = row; end
+        end
+        prow == 0 && continue
+        r += 1
+        if prow != r
+            for c in 1:n; B[r,c], B[prow,c] = B[prow,c], B[r,c]; end
+        end
+        piv = B[r, col]
+        for row in r+1:m
+            fac = B[row, col] / piv
+            for c in col+1:n; B[row,c] -= fac * B[r,c]; end
+            B[row, col] = 0.0
+        end
+        r == m && break
+    end
+    r
+end
+
+# Fill buf[1..nr, 1..nc] with M[rows[1..nr], cols[1..nc]] and return rank.
+# No heap allocation — buf is a caller-owned scratch buffer.
+@inline function _rank_submat!(buf::Matrix{Float64}, M::Matrix{Int},
+                                rows::Vector{Int}, nr::Int,
+                                cols::Vector{Int}, nc::Int)::Int
+    (nr == 0 || nc == 0) && return 0
+    @inbounds for ci in 1:nc, ri in 1:nr
+        buf[ri, ci] = M[rows[ri], cols[ci]]
+    end
+    _rank_float_view!(buf, nr, nc)
+end
+
 # Compute rank(IM[:, cols]) where IM = [I_m | M], exploiting the identity block:
 #   rank([I_m | M][:, cols]) = |I_cols| + rank(M[not_I_rows, M_cols])
 # Uses a UInt64 bitmask for covered rows — one heap allocation (the submatrix).
@@ -398,6 +437,56 @@ function _reduce(M::Matrix{Int})::Tuple{Bool, Matrix{Int}}
         N == M && return (true, M)
         M = N
     end
+end
+
+# Find connected components of the support bipartite graph of M
+# (vertices = rows ∪ columns, edges = nonzero entries).
+# Returns nothing when the graph is connected (fast path for 2-connected matrices).
+# Otherwise returns a vector of (row_indices, col_indices) pairs — one per component.
+# This detects 1-sum structure in O(m·n) without any expensive rank computation.
+function _bipartite_components(M::Matrix{Int})
+    m, n = size(M)
+    row_comp = zeros(Int, m)
+    col_comp = zeros(Int, n)
+    n_comps  = 0
+    queue    = Int[]         # positive = row vertex, negative = –(col index)
+
+    for r0 in 1:m
+        row_comp[r0] != 0 && continue
+        n_comps += 1
+        k = n_comps
+        row_comp[r0] = k
+        push!(queue, r0)
+        qi = 1
+        while qi <= length(queue)
+            v = queue[qi]; qi += 1
+            if v > 0                          # row vertex
+                for j in 1:n
+                    M[v, j] != 0 || continue
+                    col_comp[j] != 0 && continue
+                    col_comp[j] = k
+                    push!(queue, -j)
+                end
+            else                              # column vertex (stored as –j)
+                j = -v
+                for i in 1:m
+                    M[i, j] != 0 || continue
+                    row_comp[i] != 0 && continue
+                    row_comp[i] = k
+                    push!(queue, i)
+                end
+            end
+        end
+        empty!(queue)
+    end
+
+    n_comps == 1 && return nothing            # already 2-connected
+
+    comp_rows = [Int[] for _ in 1:n_comps]
+    comp_cols = [Int[] for _ in 1:n_comps]
+    for i in 1:m; push!(comp_rows[row_comp[i]], i); end
+    for j in 1:n; col_comp[j] > 0 && push!(comp_cols[col_comp[j]], j); end
+    [(comp_rows[k], comp_cols[k]) for k in 1:n_comps]
 end
 
 # Return true if all columns of M have at most 2 nonzeros.
@@ -714,7 +803,14 @@ Test whether the rows and columns of `M` can be permuted so that
 
 with rank(B) + rank(C) ≤ 2 and both A and D having r + c ≥ 4.
 
-Uses the matroid intersection algorithm of Theorem 20.2.
+For matrices with m ≤ 12 and n ≤ 12: enumerate all 2^m × 2^n row/column
+bipartitions directly.  This is O(2^m × 2^n × rank) but with aggressive
+early exit (most splits fail on rank(B) alone) and is both simpler and more
+correct than the matroid-intersection approach.
+
+For larger matrices: falls back to the matroid-intersection algorithm
+(Theorem 20.2), which may miss some decompositions but is conservative
+(only gives false negatives, never false positives).
 
 Returns `(true, (A, B, C, D))` if such a decomposition exists,
 or `(false, (M, M, M, M))` if not.
@@ -724,11 +820,56 @@ Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.2.
 """
 function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
     m, n = size(M)
-    N = m + n    # total columns of [I | M]; I-cols: 1:m, M-cols: m+1:N
-    rhoX = m     # rank([I | M]) = m always
 
-    # Precompute valid 4-element subset bitmasks (must intersect both I-cols and M-cols).
-    # Avoid lambda closures (which can allocate) by using an explicit loop.
+    if m <= 12 && n <= 12
+        # Allocation-free bipartition search.
+        # All index buffers and the Float64 scratch buffer are hoisted outside every
+        # loop level — zero heap allocation inside the O(4^m) hot path.
+        row_top   = Vector{Int}(undef, m)
+        row_bot   = Vector{Int}(undef, m)
+        col_left  = Vector{Int}(undef, n)
+        col_right = Vector{Int}(undef, n)
+        buf       = Matrix{Float64}(undef, m, n)   # scratch for rank computation
+
+        for rt_mask in UInt16(1):(UInt16(1) << m) - UInt16(2)
+            nrt = count_ones(rt_mask); nrb = m - nrt
+            nt = 0; nb = 0
+            for i in 1:m
+                if (rt_mask >> (i-1)) & 1 == 1; row_top[nt += 1] = i
+                else;                            row_bot[nb += 1] = i; end
+            end
+            for cl_mask in UInt16(1):(UInt16(1) << n) - UInt16(2)
+                ncl = count_ones(cl_mask); ncr = n - ncl
+                nrt + ncl >= 4 || continue
+                nrb + ncr >= 4 || continue
+                nl = 0; nr = 0
+                for j in 1:n
+                    if (cl_mask >> (j-1)) & 1 == 1; col_left[nl += 1] = j
+                    else;                            col_right[nr += 1] = j; end
+                end
+                rB = _rank_submat!(buf, M, row_top, nrt, col_right, ncr)
+                rB > 2 && continue
+                rC = _rank_submat!(buf, M, row_bot, nrb, col_left, ncl)
+                rB + rC > 2 && continue
+                return (true, (M[row_top[1:nrt], col_left[1:ncl]],
+                               M[row_top[1:nrt], col_right[1:ncr]],
+                               M[row_bot[1:nrb], col_left[1:ncl]],
+                               M[row_bot[1:nrb], col_right[1:ncr]]))
+            end
+        end
+        return (false, (M, M, M, M))
+    end
+
+    # Fall back: matroid-intersection approach for larger matrices.
+    return _decompose_matroid(M)
+end
+
+# Matroid-intersection fallback for matrices that exceed the bipartition threshold.
+function _decompose_matroid(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
+    m, n = size(M)
+    N = m + n
+    rhoX = m
+
     valid_masks = UInt64[]
     for s in combinations(1:N, 4)
         has_I = false; has_M = false
@@ -742,12 +883,6 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
         push!(valid_masks, mask)
     end
 
-    # Function barrier: ensures Julia compiles monomorphic code for each cache type.
-    # Array cache (N ≤ 20): O(1) direct-indexed lookup, ~10x faster than Dict.
-    # zeros is ~2.6x faster to allocate than fill(-1,...); we store rank+1 so
-    # that 0 means "not yet computed" (valid ranks are ≥ 0, stored as rank+1 ≥ 1).
-    # Slow-path buffers for _solve_submodular (hoisted here so they are allocated
-    # once per _decompose call rather than once per (S,T) pair).
     slow_dbuf = Vector{Tuple{Int,Int}}(undef, 2 * N * N)
     slow_prev = Vector{Int}(undef, N)
     slow_bfsq = Vector{Int}(undef, N)
@@ -861,9 +996,12 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
             end
         end
 
-        # Build digraph D: iterate over Z bits and V\(S∪T∪Z) bits directly
+        # Build digraph D: iterate over Z bits and V\(S∪T∪Z) bits directly.
+        # Edge condition: swapping u∈Z for v∈V\(S∪T∪Z) keeps rank(S∪Z) unchanged
+        # → rk(S∪(Z\{u})∪{v}) = rk(S∪Z) = rhoSZ (and analogously for T).
+        # Using rhoSZ/rhoTZ (not rhoS+|Z|) is correct even when the rank
+        # invariant rk(S∪Z)=rk(S)+|Z| fails after non-trivial augmenting paths.
         n_de = 0
-        rhoS = rk(S_mask); rhoT = rk(T_mask); rhoZ = count_ones(Z_mask)
         VnotSTZ = all_mask & ~ST_mask & ~Z_mask
         let zb = Z_mask
             while !iszero(zb)
@@ -872,8 +1010,8 @@ function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
                 Zminu_mask = Z_mask & ~u_lsb
                 SZminu = S_mask | Zminu_mask
                 TZminu = T_mask | Zminu_mask
-                rhoSZ_target = rhoS + rhoZ
-                rhoTZ_target = rhoT + rhoZ
+                rhoSZ_target = rhoSZ
+                rhoTZ_target = rhoTZ
                 let vb = VnotSTZ
                     while !iszero(vb)
                         vbit = vb & -vb; vb &= vb - 1
@@ -1245,14 +1383,27 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::B
     ok, M = _reduce(M)
     ok || return false
     (size(M, 1) == 0 || size(M, 2) == 0) && return true
-    
+
+    # 1-sum: split into connected components and test each independently.
+    # O(m·n) bipartite BFS — far cheaper than any subsequent step.
+    let comps = _bipartite_components(M)
+        if comps !== nothing
+            return all(((rows, cols),) -> _is_tu_recursive(M[rows, cols], depth+1, seen), comps)
+        end
+    end
+
     # Cycle detection
     M in seen && return false
     push!(seen, copy(M))
-    
+
     _is_network_matrix(M) && return true
     _is_network_matrix(Matrix{Int}(M')) && return true
     _is_special_matrix(M) && return true
+
+    # Quick non-TU detector: Eulerian check at k ≤ 3 catches most violations
+    # (e.g. any 2×2 or 3×3 bad submatrix) in microseconds, before the O(4^m)
+    # bipartition search runs.
+    _tu_eulerian(M, 3) || return false
 
     found, (A, B, C, D) = _decompose(M)
     found || return false
@@ -1360,6 +1511,173 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::B
 
     else
         error("Unexpected rank(B) + rank(C) = $(rB + rC)")
+    end
+end
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CMR partition algorithm (Ghouila-Houri criterion)
+# Ports tuPartition / tuPartitionSubset / tuPartitionSearch from cmr/tu.c.
+# ──────────────────────────────────────────────────────────────────────────────
+
+function _tu_partition(M::Matrix{Int})::Bool
+    r, c = size(M)
+    r > c && return _tu_partition(Matrix{Int}(M'))  # work over smaller dimension
+
+    # col_sum[j] = Σ_{i∈R} s[i]·M[i,j], s[i] ∈ {+1,−1}
+    # sel[i]: 0 = not in R,  +1 = in R sign +1,  −1 = in R sign −1
+    col_sum = zeros(Int, c)
+    sel     = zeros(Int8, r)
+
+    # Search for a ±1 sign assignment for selected rows so |col_sum[j]| ≤ 1 ∀j.
+    # col_sum already reflects the initial (+1) signs for all rows in R.
+    function search(row::Int)::Bool
+        while row <= r && sel[row] == 0; row += 1; end
+        row > r && return all(j -> -1 <= col_sum[j] <= 1, 1:c)
+        search(row + 1) && return true                          # keep +1
+        for j in 1:c; col_sum[j] -= 2M[row, j]; end           # flip to −1
+        sel[row] = -1
+        found = search(row + 1)
+        sel[row] = 1
+        for j in 1:c; col_sum[j] += 2M[row, j]; end           # restore
+        found
+    end
+
+    # Enumerate all 2^r subsets R; for each call search.
+    function enum_subsets(row::Int)::Bool
+        row > r && return search(1)
+        sel[row] = 0                                            # exclude
+        enum_subsets(row + 1) || return false
+        sel[row] = 1                                            # include (sign +1)
+        for j in 1:c; col_sum[j] += M[row, j]; end
+        result = enum_subsets(row + 1)
+        for j in 1:c; col_sum[j] -= M[row, j]; end
+        sel[row] = 0
+        result
+    end
+
+    enum_subsets(1)
+end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CMR Eulerian algorithm
+# Ports tuEulerian / tuEulerianRows / tuEulerianColumns from cmr/tu.c.
+# M is TU iff every square Eulerian submatrix has sum ≡ 0 (mod 4).
+# A k×k submatrix is Eulerian when every row and every column within it has an
+# even number of nonzeros.
+# ──────────────────────────────────────────────────────────────────────────────
+
+function _tu_eulerian(M::Matrix{Int}, max_k::Int = typemax(Int))::Bool
+    r, c = size(M)
+    r > c && return _tu_eulerian(Matrix{Int}(M'), max_k)
+
+    col_nz   = zeros(Int, c)    # nonzeros per column in currently selected rows
+    row_nz   = zeros(Int, r)    # nonzeros per row in currently selected columns
+    sub_rows = zeros(Int, r)    # sub_rows[1..k] = selected row indices
+    use_cols = zeros(Int, c)    # usable column indices (even col_nz)
+    col_sel  = zeros(Int, c)    # col_sel[1..k] = index-into-use_cols of chosen col
+    sum_ent  = Ref(0)           # sum of entries in selected k×k submatrix
+
+    # Pick k−n_sel more columns from use_cols[1..n_use]; n_sel already chosen.
+    function enum_cols(k::Int, n_sel::Int, n_use::Int)::Bool
+        if n_sel < k
+            first = n_sel == 0 ? 1 : col_sel[n_sel] + 1
+            last  = n_use - (k - n_sel) + 1
+            for u in first:last
+                col = use_cols[u]
+                for s in 1:k                                    # update row_nz / sum
+                    v = M[sub_rows[s], col]
+                    if v != 0; sum_ent[] += v; row_nz[sub_rows[s]] += 1; end
+                end
+                col_sel[n_sel + 1] = u
+                enum_cols(k, n_sel + 1, n_use) || return false
+                for s in 1:k                                    # restore
+                    v = M[sub_rows[s], col]
+                    if v != 0; sum_ent[] -= v; row_nz[sub_rows[s]] -= 1; end
+                end
+            end
+            return true
+        else
+            # Columns are Eulerian by construction (selected from use_cols).
+            # Check whether rows are also Eulerian and sum ≢ 0 mod 4.
+            sum_ent[] % 4 == 0 && return true
+            return !all(s -> row_nz[sub_rows[s]] % 2 == 0, 1:k)
+        end
+    end
+
+    # Pick k−n_sel more rows from 1..r; n_sel already chosen.
+    function enum_rows(k::Int, n_sel::Int)::Bool
+        if n_sel < k
+            first = n_sel == 0 ? 1 : sub_rows[n_sel] + 1
+            last  = r - (k - n_sel) + 1
+            for row in first:last
+                sub_rows[n_sel + 1] = row
+                for j in 1:c; col_nz[j] += (M[row, j] != 0) ? 1 : 0; end
+                enum_rows(k, n_sel + 1) || return false
+                for j in 1:c; col_nz[j] -= (M[row, j] != 0) ? 1 : 0; end
+            end
+            return true
+        else
+            # k rows chosen. Usable columns = those with even nonzero count.
+            n_use = 0
+            for j in 1:c
+                if col_nz[j] % 2 == 0; n_use += 1; use_cols[n_use] = j; end
+            end
+            n_use < k && return true                            # too few usable cols
+            enum_cols(k, 0, n_use)
+        end
+    end
+
+    for k in 2:min(min(r, c), max_k)
+        enum_rows(k, 0) || return false
+    end
+    true
+end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Public dispatcher — mirrors CMRtuTest
+# ──────────────────────────────────────────────────────────────────────────────
+
+"""
+    cmr_is_totally_unimodular(M; algorithm=:decomposition)
+
+Test whether integer matrix `M` is totally unimodular using one of the three
+algorithms from the CMR library (`src/cmr/tu.c`, `CMRtuTest`):
+
+| `algorithm`      | CMR constant                     | Description                       |
+|:-----------------|:---------------------------------|:----------------------------------|
+| `:decomposition` | `CMR_TU_ALGORITHM_DECOMPOSITION` | Seymour decomposition (default)   |
+| `:eulerian`      | `CMR_TU_ALGORITHM_EULERIAN`      | Eulerian submatrix criterion      |
+| `:partition`     | `CMR_TU_ALGORITHM_PARTITION`     | Ghouila-Houri partition criterion |
+
+**`:decomposition`** delegates to [`is_totally_unimodular`](@ref).
+
+**`:eulerian`** — M is TU iff every square Eulerian submatrix (each row and column
+within it has an even number of nonzeros) has total entry sum ≡ 0 (mod 4).
+
+**`:partition`** (Ghouila-Houri) — M is TU iff for every subset R of rows there
+exists a partition R = R⁺ ∪ R⁻ with |∑_{i∈R⁺} Mᵢⱼ − ∑_{i∈R⁻} Mᵢⱼ| ≤ 1 for
+all columns j.
+
+Both `:eulerian` and `:partition` are exponential-time but exact for {-1,0,1}
+inputs; CMR uses them as cross-checks and for small matrices.
+
+# Arguments
+- `M::Matrix{Int}`: Integer matrix whose entries must be in {-1, 0, 1}.
+- `algorithm::Symbol`: Which algorithm to use (default `:decomposition`).
+"""
+function cmr_is_totally_unimodular(M::Matrix{Int};
+                                   algorithm::Symbol = :decomposition)::Bool
+    all(m -> m in (-1, 0, 1), M) || return false
+    if algorithm === :decomposition
+        return is_totally_unimodular(M)
+    elseif algorithm === :eulerian
+        return _tu_eulerian(M)
+    elseif algorithm === :partition
+        return _tu_partition(M)
+    else
+        throw(ArgumentError("Unknown algorithm $(repr(algorithm)). " *
+                            "Use :decomposition, :eulerian, or :partition."))
     end
 end
 

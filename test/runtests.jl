@@ -4,6 +4,7 @@ using LinearAlgebra
 using Random
 
 include("internals.jl")
+include("test_cmr.jl")
 
 @testset "Public API" begin
 
