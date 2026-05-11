@@ -191,6 +191,13 @@ end
 _has_dependent_vectors(M::Matrix{Int}) =
     _has_dependent_rows(M) || _has_dependent_cols(M)
 
+# Return true if M is "degenerate" for the 3-sum (Case 4) construction:
+# any row/column has ≤1 nonzero, or any two rows/columns are equal or opposite.
+_is_degenerate(M::Matrix{Int}) =
+    any(i -> count(!iszero, @view M[i,:]) <= 1, 1:size(M,1)) ||
+    any(j -> count(!iszero, @view M[:,j]) <= 1, 1:size(M,2)) ||
+    _has_dependent_vectors(M)
+
 # Remove one row from each dependent pair of rows.
 function _drop_dependent_rows(M::Matrix{Int})
     r = size(M, 1)
@@ -818,7 +825,8 @@ or `(false, (M, M, M, M))` if not.
 # Reference
 Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.2.
 """
-function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
+function _decompose(M::Matrix{Int};
+                    reject_degenerate_3sum::Bool = false)::Tuple{Bool, NTuple{4, Matrix{Int}}}
     m, n = size(M)
 
     if m <= 12 && n <= 12
@@ -831,41 +839,56 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
         col_right = Vector{Int}(undef, n)
         buf       = Matrix{Float64}(undef, m, n)   # scratch for rank computation
 
-        for rt_mask in UInt16(1):(UInt16(1) << m) - UInt16(2)
-            nrt = count_ones(rt_mask); nrb = m - nrt
-            nt = 0; nb = 0
-            for i in 1:m
-                if (rt_mask >> (i-1)) & 1 == 1; row_top[nt += 1] = i
-                else;                            row_bot[nb += 1] = i; end
-            end
-            for cl_mask in UInt16(1):(UInt16(1) << n) - UInt16(2)
-                ncl = count_ones(cl_mask); ncr = n - ncl
-                nrt + ncl >= 4 || continue
-                nrb + ncr >= 4 || continue
-                nl = 0; nr = 0
-                for j in 1:n
-                    if (cl_mask >> (j-1)) & 1 == 1; col_left[nl += 1] = j
-                    else;                            col_right[nr += 1] = j; end
+        # Two-pass search: pass 1 only accepts rB+rC ≤ 1 (2-sums), pass 2
+        # accepts rB+rC ≤ 2 (3-sums and pivots). Preferring 2-sums avoids
+        # choosing pivots that can cause the recursion to cycle back to a
+        # matrix already in `seen`.
+        for pass in 1:2
+            max_sum = pass == 1 ? 1 : 2
+            for rt_mask in UInt16(1):(UInt16(1) << m) - UInt16(2)
+                nrt = count_ones(rt_mask); nrb = m - nrt
+                nt = 0; nb = 0
+                for i in 1:m
+                    if (rt_mask >> (i-1)) & 1 == 1; row_top[nt += 1] = i
+                    else;                            row_bot[nb += 1] = i; end
                 end
-                rB = _rank_submat!(buf, M, row_top, nrt, col_right, ncr)
-                rB > 2 && continue
-                rC = _rank_submat!(buf, M, row_bot, nrb, col_left, ncl)
-                rB + rC > 2 && continue
-                return (true, (M[row_top[1:nrt], col_left[1:ncl]],
-                               M[row_top[1:nrt], col_right[1:ncr]],
-                               M[row_bot[1:nrb], col_left[1:ncl]],
-                               M[row_bot[1:nrb], col_right[1:ncr]]))
+                for cl_mask in UInt16(1):(UInt16(1) << n) - UInt16(2)
+                    ncl = count_ones(cl_mask); ncr = n - ncl
+                    nrt + ncl >= 4 || continue
+                    nrb + ncr >= 4 || continue
+                    nl = 0; nr = 0
+                    for j in 1:n
+                        if (cl_mask >> (j-1)) & 1 == 1; col_left[nl += 1] = j
+                        else;                            col_right[nr += 1] = j; end
+                    end
+                    rB = _rank_submat!(buf, M, row_top, nrt, col_right, ncr)
+                    rB > max_sum && continue
+                    rC = _rank_submat!(buf, M, row_bot, nrb, col_left, ncl)
+                    rB + rC > max_sum && continue
+                    # When requested, skip 3-sum partitions whose A or D subblock is
+                    # degenerate — _apply_decomposition needs non-degenerate A/D to
+                    # construct the Case 4 matrices correctly.
+                    if reject_degenerate_3sum && rB == 1 && rC == 1
+                        (_is_degenerate(M[row_top[1:nrt], col_left[1:ncl]]) ||
+                         _is_degenerate(M[row_bot[1:nrb], col_right[1:ncr]])) && continue
+                    end
+                    return (true, (M[row_top[1:nrt], col_left[1:ncl]],
+                                   M[row_top[1:nrt], col_right[1:ncr]],
+                                   M[row_bot[1:nrb], col_left[1:ncl]],
+                                   M[row_bot[1:nrb], col_right[1:ncr]]))
+                end
             end
         end
         return (false, (M, M, M, M))
     end
 
     # Fall back: matroid-intersection approach for larger matrices.
-    return _decompose_matroid(M)
+    return _decompose_matroid(M; reject_degenerate_3sum)
 end
 
 # Matroid-intersection fallback for matrices that exceed the bipartition threshold.
-function _decompose_matroid(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
+function _decompose_matroid(M::Matrix{Int};
+                             reject_degenerate_3sum::Bool = false)::Tuple{Bool, NTuple{4, Matrix{Int}}}
     m, n = size(M)
     N = m + n
     rhoX = m
@@ -888,10 +911,12 @@ function _decompose_matroid(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
     slow_bfsq = Vector{Int}(undef, N)
     if N <= 20
         return _decompose_loop(M, m, n, rhoX, valid_masks, zeros(Int8, 1 << N),
-                               slow_dbuf, slow_prev, slow_bfsq)
+                               slow_dbuf, slow_prev, slow_bfsq;
+                               reject_degenerate_3sum)
     else
         return _decompose_loop(M, m, n, rhoX, valid_masks, Dict{UInt64, Int}(),
-                               slow_dbuf, slow_prev, slow_bfsq)
+                               slow_dbuf, slow_prev, slow_bfsq;
+                               reject_degenerate_3sum)
     end
 end
 
@@ -899,7 +924,8 @@ function _decompose_loop(M::Matrix{Int}, m::Int, n::Int, rhoX::Int,
                           valid_masks::Vector{UInt64}, cache,
                           slow_dbuf::Vector{Tuple{Int,Int}},
                           slow_prev::Vector{Int},
-                          slow_bfsq::Vector{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
+                          slow_bfsq::Vector{Int};
+                          reject_degenerate_3sum::Bool = false)::Tuple{Bool, NTuple{4, Matrix{Int}}}
     @inbounds for S_mask in valid_masks
         @inbounds for T_mask in valid_masks
             # S and T must be disjoint
@@ -933,6 +959,13 @@ function _decompose_loop(M::Matrix{Int}, m::Int, n::Int, rhoX::Int,
             B = M[row_top,  col_right]
             C = M[row_bot,  col_left ]
             D = M[row_bot,  col_right]
+
+            if reject_degenerate_3sum
+                rB_chk = _rank_int(B); rC_chk = _rank_int(C)
+                if rB_chk == 1 && rC_chk == 1
+                    (_is_degenerate(A) || _is_degenerate(D)) && continue
+                end
+            end
 
             return (true, (A, B, C, D))
         end
@@ -1379,7 +1412,7 @@ end
 
 function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::Bool
     depth > 100 && error("Maximum recursion depth exceeded")
-    
+
     ok, M = _reduce(M)
     ok || return false
     (size(M, 1) == 0 || size(M, 2) == 0) && return true
@@ -1410,7 +1443,18 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::B
 
     rB = _rank_int(B)
     rC = _rank_int(C)
+    return _apply_decomposition(M, A, B, C, D, rB, rC, depth, seen)
+end
 
+# Dispatch on the rank case of a decomposition M = [A B; C D].
+# When rB==1 and rC==1 (3-sum / Case 4), if the first decomposition found by
+# _decompose gives a degenerate A or D, we retry with reject_degenerate_3sum=true
+# to find a non-degenerate partition instead of incorrectly returning false.
+function _apply_decomposition(M::Matrix{Int},
+                               A::Matrix{Int}, B::Matrix{Int},
+                               C::Matrix{Int}, D::Matrix{Int},
+                               rB::Int, rC::Int,
+                               depth::Int, seen::Set{Matrix{Int}})::Bool
     if rB == 0 && rC == 0
         return _is_tu_recursive(A, depth+1, seen) && _is_tu_recursive(D, depth+1, seen)
 
@@ -1425,13 +1469,20 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::B
                _is_tu_recursive([f D], depth+1, seen)
 
     elseif rB == 1 && rC == 1
-        A_degenerate = any(i -> count(!iszero, A[i,:]) <= 1, 1:size(A,1)) ||
-                       any(j -> count(!iszero, A[:,j]) <= 1, 1:size(A,2)) ||
-                       _has_dependent_vectors(A)
-        D_degenerate = any(i -> count(!iszero, D[i,:]) <= 1, 1:size(D,1)) ||
-                       any(j -> count(!iszero, D[:,j]) <= 1, 1:size(D,2)) ||
-                       _has_dependent_vectors(D)
-        (A_degenerate || D_degenerate) && return false
+        # If the current partition is degenerate (A or D has trivial/dependent
+        # rows or columns), it is not suitable for the 3-sum construction.
+        # Search for an alternative non-degenerate partition instead.
+        if _is_degenerate(A) || _is_degenerate(D)
+            found2, (A2, B2, C2, D2) = _decompose(M; reject_degenerate_3sum = true)
+            if !found2
+                # Every rB+rC≤2 partition has degenerate A/D. For small matrices,
+                # fall back to the partition algorithm (exponential but correct).
+                size(M, 1) <= 12 && size(M, 2) <= 12 && return _tu_partition(M)
+                return false
+            end
+            rB2 = _rank_int(B2); rC2 = _rank_int(C2)
+            return _apply_decomposition(M, A2, B2, C2, D2, rB2, rC2, depth, seen)
+        end
 
         f_B, g_B = _extract_rank1(B)
         f_C, g_C = _extract_rank1(C)
@@ -1524,6 +1575,23 @@ function _tu_partition(M::Matrix{Int})::Bool
     r, c = size(M)
     r > c && return _tu_partition(Matrix{Int}(M'))  # work over smaller dimension
 
+    # Build CSR sparse row structure (mirrors the C CMR implementation).
+    # 3 flat allocations replace the O(r) vector-of-vectors approach, improving
+    # cache locality for the hot inner loops.
+    row_ptr = zeros(Int, r + 1)
+    for i in 1:r, j in 1:c; iszero(M[i, j]) || (row_ptr[i + 1] += 1); end
+    for i in 1:r; row_ptr[i + 1] += row_ptr[i]; end   # prefix-sum → row boundaries
+    nnz = row_ptr[r + 1]
+    row_col = Vector{Int}(undef, nnz)   # column index of each nonzero
+    row_val = Vector{Int}(undef, nnz)   # value of each nonzero
+    for i in 1:r
+        ptr = row_ptr[i]
+        for j in 1:c
+            v = M[i, j]; iszero(v) && continue
+            ptr += 1; row_col[ptr] = j; row_val[ptr] = v
+        end
+    end
+
     # col_sum[j] = Σ_{i∈R} s[i]·M[i,j], s[i] ∈ {+1,−1}
     # sel[i]: 0 = not in R,  +1 = in R sign +1,  −1 = in R sign −1
     col_sum = zeros(Int, c)
@@ -1533,13 +1601,18 @@ function _tu_partition(M::Matrix{Int})::Bool
     # col_sum already reflects the initial (+1) signs for all rows in R.
     function search(row::Int)::Bool
         while row <= r && sel[row] == 0; row += 1; end
-        row > r && return all(j -> -1 <= col_sum[j] <= 1, 1:c)
+        if row > r
+            for j in 1:c; -1 <= col_sum[j] <= 1 || return false; end
+            return true
+        end
         search(row + 1) && return true                          # keep +1
-        for j in 1:c; col_sum[j] -= 2M[row, j]; end           # flip to −1
+        for k in row_ptr[row]+1:row_ptr[row+1]                 # flip to −1
+            @inbounds col_sum[row_col[k]] -= 2row_val[k]; end
         sel[row] = -1
         found = search(row + 1)
         sel[row] = 1
-        for j in 1:c; col_sum[j] += 2M[row, j]; end           # restore
+        for k in row_ptr[row]+1:row_ptr[row+1]                 # restore
+            @inbounds col_sum[row_col[k]] += 2row_val[k]; end
         found
     end
 
@@ -1549,9 +1622,11 @@ function _tu_partition(M::Matrix{Int})::Bool
         sel[row] = 0                                            # exclude
         enum_subsets(row + 1) || return false
         sel[row] = 1                                            # include (sign +1)
-        for j in 1:c; col_sum[j] += M[row, j]; end
+        for k in row_ptr[row]+1:row_ptr[row+1]
+            @inbounds col_sum[row_col[k]] += row_val[k]; end
         result = enum_subsets(row + 1)
-        for j in 1:c; col_sum[j] -= M[row, j]; end
+        for k in row_ptr[row]+1:row_ptr[row+1]
+            @inbounds col_sum[row_col[k]] -= row_val[k]; end
         sel[row] = 0
         result
     end
@@ -1570,6 +1645,18 @@ end
 function _tu_eulerian(M::Matrix{Int}, max_k::Int = typemax(Int))::Bool
     r, c = size(M)
     r > c && return _tu_eulerian(Matrix{Int}(M'), max_k)
+
+    # Build CSR sparse row structure (column indices only — no values needed here).
+    # Iterating only over nonzeros mirrors the CSR format used by C CMR.
+    row_ptr2 = zeros(Int, r + 1)
+    for i in 1:r, j in 1:c; iszero(M[i, j]) || (row_ptr2[i + 1] += 1); end
+    for i in 1:r; row_ptr2[i + 1] += row_ptr2[i]; end
+    nnz2 = row_ptr2[r + 1]
+    row_col2 = Vector{Int}(undef, nnz2)
+    for i in 1:r
+        ptr = row_ptr2[i]
+        for j in 1:c; iszero(M[i, j]) && continue; ptr += 1; row_col2[ptr] = j; end
+    end
 
     col_nz   = zeros(Int, c)    # nonzeros per column in currently selected rows
     row_nz   = zeros(Int, r)    # nonzeros per row in currently selected columns
@@ -1601,7 +1688,10 @@ function _tu_eulerian(M::Matrix{Int}, max_k::Int = typemax(Int))::Bool
             # Columns are Eulerian by construction (selected from use_cols).
             # Check whether rows are also Eulerian and sum ≢ 0 mod 4.
             sum_ent[] % 4 == 0 && return true
-            return !all(s -> row_nz[sub_rows[s]] % 2 == 0, 1:k)
+            for s in 1:k
+                row_nz[sub_rows[s]] % 2 == 0 || return true    # row not Eulerian → ok
+            end
+            return false                                        # Eulerian + sum ≢ 0 mod 4
         end
     end
 
@@ -1612,9 +1702,11 @@ function _tu_eulerian(M::Matrix{Int}, max_k::Int = typemax(Int))::Bool
             last  = r - (k - n_sel) + 1
             for row in first:last
                 sub_rows[n_sel + 1] = row
-                for j in 1:c; col_nz[j] += (M[row, j] != 0) ? 1 : 0; end
+                for k2 in row_ptr2[row]+1:row_ptr2[row+1]       # sparse update
+                    @inbounds col_nz[row_col2[k2]] += 1; end
                 enum_rows(k, n_sel + 1) || return false
-                for j in 1:c; col_nz[j] -= (M[row, j] != 0) ? 1 : 0; end
+                for k2 in row_ptr2[row]+1:row_ptr2[row+1]       # sparse restore
+                    @inbounds col_nz[row_col2[k2]] -= 1; end
             end
             return true
         else
