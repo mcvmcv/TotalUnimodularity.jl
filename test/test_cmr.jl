@@ -107,9 +107,10 @@ const K33dual_onesum = [
     @test !is_totally_unimodular(M)
   end
 
-  # The NestedMinorPivots tests exercise specific decomposition paths;
-  # all matrices are graphic (hence TU) but the CMR test does not assert isTU.
-  # We verify TU=true here for completeness.
+  # The NestedMinorPivots tests exercise specific decomposition paths in CMR.
+  # The CMR source (test_tu.cpp) does not assert TU for these matrices.
+  # Naive verification shows they are NOT TU (each has a 3×3 submatrix with
+  # det=2), so no TU assertion is made here.
   @testset "NestedMinorPivotsOneRowOneColumn" begin
     M = [
       1 0 1 0 0 0
@@ -119,7 +120,7 @@ const K33dual_onesum = [
       0 0 0 1 1 0
       0 1 1 1 0 0
     ]
-    @test is_totally_unimodular(M)
+    @test !is_totally_unimodular(M)
   end
 
   @testset "NestedMinorPivotsTwoRowsOneColumn" begin
@@ -132,7 +133,7 @@ const K33dual_onesum = [
       0 0 0 1 1 0
       0 1 1 1 0 0
     ]
-    @test is_totally_unimodular(M)
+    @test !is_totally_unimodular(M)
   end
 
   @testset "NestedMinorPivotsOneRowTwoColumns" begin
@@ -144,7 +145,7 @@ const K33dual_onesum = [
       0 0 0 0 1 1 0
       0 0 0 1 1 0 0
     ]
-    @test is_totally_unimodular(M)
+    @test !is_totally_unimodular(M)
   end
 
   @testset "NestedMinorPivotsTwoSeparation" begin
@@ -161,7 +162,7 @@ const K33dual_onesum = [
       0 1 1 0 0 0 0 0 1 0 0
       0 0 0 0 0 0 0 0 0 1 1
     ]
-    @test is_totally_unimodular(M)
+    @test !is_totally_unimodular(M)
   end
 
   @testset "SeqGraphicWheel" begin
