@@ -1,7 +1,8 @@
 using Random
 using Graphs
 
-import TotalUnimodularity: _is_trivial_vector,
+import TotalUnimodularity: _tu_partition, _gf2_rank_capped,
+                            _is_trivial_vector,
                             _is_special_matrix, _drop_trivial_vectors,
                             _reduce_trivial_vectors, _has_dependent_rows,
                             _has_dependent_cols, _has_dependent_vectors,
@@ -357,6 +358,67 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
             B = f * g'
             fx, gx = _extract_rank1(B)
             @test fx * gx == B
+        end
+    end
+
+    @testset "_tu_partition" begin
+        # Regression: these TU matrices were falsely rejected by an interleaved
+        # subset/sign search (subsets must each choose their own signing —
+        # the ∀R and ∃signs phases cannot share one in/out/± tree).
+        M1 = [0 1 0 0 0 1 0; -1 0 0 0 0 0 0; -1 0 -1 0 -1 1 1; 0 1 0 -1 0 0 0;
+              0 1 0 0 0 0 -1; 0 0 -1 0 0 0 0; 0 1 0 0 0 1 0]
+        M2 = [0 0 0 0 -1 0 0; 1 -1 0 0 1 0 0; -1 0 0 0 0 1 0; 0 0 -1 1 0 0 0;
+              1 0 1 0 0 0 0; 0 0 0 1 -1 0 0; 0 1 0 0 0 0 0; -1 0 0 -1 0 0 1;
+              0 -1 -1 0 1 0 0]
+        @test _tu_partition(M1)
+        @test _tu_partition(M2)
+        @test _tu_partition(F_1)
+        @test !_tu_partition([1 1 0; 1 0 1; 0 1 1])
+
+        # Density-biased random fuzz vs the naive oracle (uniform draws are a
+        # weak distribution here — the interleaving bug survived 20k of them).
+        rng = MersenneTwister(4242)
+        for _ in 1:500
+            r, c = rand(rng, 5:8), rand(rng, 5:8)
+            p = 0.2 + 0.7 * rand(rng)
+            M = [rand(rng) < p ? rand(rng, (-1, 1)) : 0 for i in 1:r, j in 1:c]
+            @test _tu_partition(M) == naive_is_totally_unimodular(M)
+        end
+    end
+
+    @testset "_gf2_rank_capped" begin
+        # Reference GF(2) rank: reduce each word against the basis to a
+        # fixpoint, count independent insertions.
+        function gf2_rank(words::Vector{UInt16})
+            basis = UInt16[]
+            for w in words
+                changed = true
+                while changed
+                    changed = false
+                    for b in basis
+                        if xor(w, b) < w
+                            w ⊻= b
+                            changed = true
+                        end
+                    end
+                end
+                w != 0 && push!(basis, w)
+            end
+            length(basis)
+        end
+        rng = MersenneTwister(17)
+        for _ in 1:1000
+            m, n = rand(rng, 1:12), rand(rng, 1:12)
+            M = rand(rng, (-1, 0, 1), m, n)
+            srow = [UInt16(sum(UInt16(1) << (j-1) for j in 1:n if M[i,j] != 0; init=UInt16(0))) for i in 1:m]
+            rows = UInt16((1 << m) - 1)
+            cols = UInt16((1 << n) - 1)
+            ref = gf2_rank(srow)
+            for cap in 1:3
+                @test _gf2_rank_capped(srow, rows, cols, cap) == min(ref, cap)
+            end
+            # soundness: GF(2) rank is a lower bound for the rational rank
+            @test min(ref, 3) <= TotalUnimodularity._rank_int(M)
         end
     end
 

@@ -154,11 +154,39 @@ The matroid-intersection fallback (`_decompose_matroid`) for matrices with
 m > 12 or n > 12 is effectively unusable in practice: for a 14×14 matrix it
 enumerates ~3.4×10⁸ (S,T) pairs and runs for hours (this stalled the test
 suite on the CMR 14×14 test matrices). `_is_tu_irreducible` therefore routes
-matrices with min(m,n) ≤ 16 to the exact Ghouila-Houri `_tu_partition` test
-(O(3^min(m,n)), seconds) before reaching the matroid search. Only matrices
-with both dimensions above 16 hit `_decompose_matroid` — and at those sizes
-it remains impractically slow. Making the decomposition search scale is the
-main open performance problem.
+matrices with min(m,n) ≤ 24 to the exact branch-and-prune Ghouila-Houri
+`_tu_partition` test before reaching the matroid search. Measured worst
+cases (dense TU inputs, which force full exhaustion): ~0.1s at min-dim 16,
+~0.5s at 18, ~3s at 20, ~13s at 22; non-TU inputs usually exit in
+milliseconds. Only matrices with both dimensions above 24 hit
+`_decompose_matroid` — impractically slow. Making the decomposition search
+scale is the main open performance problem.
+
+### Ghouila-Houri: keep subset choice and sign search separate
+`_tu_partition` enumerates subsets in an outer phase and searches signs in an
+inner branch-and-prune phase. The two must NOT be interleaved into a single
+in/out/± tree: subsets sharing an in/out prefix would be forced to share
+sign choices along it, computing a strictly stronger condition than
+Ghouila-Houri (each subset gets its own signing) and yielding false
+negatives. An interleaved variant passed 20,000 uniform random oracle tests
+before a density-biased fuzz exposed it — uniform random {-1,0,1} draws are
+a weak test distribution for this algorithm.
+
+Two sound accelerations inside the sign search for a fixed subset R:
+pruning (once |partial column sum| exceeds 1 + remaining unsigned nonzeros
+in that column, no completion can recover — and at the leaves this invariant
+IS the Ghouila-Houri bound, so no final scan is needed) and sign symmetry
+(the first selected row takes +1 WLOG, halving the tree).
+
+### GF(2) rank prefilter in the bipartition search
+For integer matrices, rank over GF(2) never exceeds rank over ℚ (a k×k
+submatrix nonsingular mod 2 has odd, hence nonzero, determinant). For
+{-1,0,1} matrices the support pattern IS M mod 2, so `_decompose` computes a
+word-parallel XOR-basis rank of row-support bitmasks (capped at 3) before
+touching the Float64 elimination path; candidates whose GF(2) lower bounds
+already exceed the rank budget — the overwhelming majority — are rejected in
+a few dozen bit operations. This gave ~20× on the 12×12 worst case (51s →
+2.4s).
 
 The inner rank computation uses `_rank_int` (Bareiss integer elimination),
 which is ~18× faster than `LinearAlgebra.rank` (SVD) for the small {-1,0,1}

@@ -356,6 +356,40 @@ function _rank_float_view!(B::Matrix{Float64}, m::Int, n::Int)::Int
     r
 end
 
+# GF(2) rank of the support-pattern rows {srow[i] & colmask : bit i-1 set in
+# row_bits}, capped at `cap` (early exit once reached). For {-1,0,1} matrices
+# the support pattern is M mod 2, and GF(2) rank never exceeds rational rank
+# (a k×k submatrix nonsingular mod 2 has odd — hence nonzero — determinant),
+# so this is a sound, word-parallel lower bound used to prune rank checks.
+@inline function _gf2_rank_capped(srow::Vector{UInt16}, row_bits::UInt16,
+                                   colmask::UInt16, cap::Int)::Int
+    cap <= 0 && return 0
+    rank = 0
+    # XOR basis, kept in decreasing value order; with unique leading bits,
+    # value order equals leading-bit order, so one reduction pass suffices.
+    b1 = UInt16(0); b2 = UInt16(0); b3 = UInt16(0)
+    bits = row_bits
+    @inbounds while !iszero(bits)
+        i = trailing_zeros(bits) + 1
+        bits &= bits - UInt16(1)
+        w = srow[i] & colmask
+        (b1 != 0 && xor(w, b1) < w) && (w ⊻= b1)
+        (b2 != 0 && xor(w, b2) < w) && (w ⊻= b2)
+        (b3 != 0 && xor(w, b3) < w) && (w ⊻= b3)
+        iszero(w) && continue
+        rank += 1
+        rank >= cap && return rank
+        if w > b1
+            b3 = b2; b2 = b1; b1 = w
+        elseif w > b2
+            b3 = b2; b2 = w
+        else
+            b3 = w
+        end
+    end
+    rank
+end
+
 # Fill buf[1..nr, 1..nc] with M[rows[1..nr], cols[1..nc]] and return rank.
 # No heap allocation — buf is a caller-owned scratch buffer.
 @inline function _rank_submat!(buf::Matrix{Float64}, M::Matrix{Int},
@@ -837,6 +871,19 @@ function _decompose(M::Matrix{Int};
         col_right = Vector{Int}(undef, n)
         buf       = Matrix{Float64}(undef, m, n)   # scratch for rank computation
 
+        # Row support patterns as bitmasks (bit j-1 ⇔ M[i,j] ≠ 0), for the
+        # GF(2) rank prefilter: most candidate bipartitions die on a
+        # word-parallel GF(2) lower bound without ever touching the Float64
+        # rank path or building column index lists.
+        srow = Vector{UInt16}(undef, m)
+        for i in 1:m
+            s = UInt16(0)
+            for j in 1:n; iszero(M[i, j]) || (s |= UInt16(1) << (j - 1)); end
+            srow[i] = s
+        end
+        full_rows = (UInt16(1) << m) - UInt16(1)
+        full_cols = (UInt16(1) << n) - UInt16(1)
+
         # Two-pass search: pass 1 only accepts rB+rC ≤ 1 (2-sums), pass 2
         # accepts rB+rC ≤ 2 (3-sums and pivots). Preferring 2-sums avoids
         # choosing pivots that can cause the recursion to cycle back to a
@@ -845,15 +892,27 @@ function _decompose(M::Matrix{Int};
             max_sum = pass == 1 ? 1 : 2
             for rt_mask in UInt16(1):(UInt16(1) << m) - UInt16(2)
                 nrt = count_ones(rt_mask); nrb = m - nrt
+                rb_mask = full_rows & ~rt_mask
                 nt = 0; nb = 0
-                for i in 1:m
-                    if (rt_mask >> (i-1)) & 1 == 1; row_top[nt += 1] = i
-                    else;                            row_bot[nb += 1] = i; end
-                end
+                rows_built = false
                 for cl_mask in UInt16(1):(UInt16(1) << n) - UInt16(2)
                     ncl = count_ones(cl_mask); ncr = n - ncl
                     nrt + ncl >= 4 || continue
                     nrb + ncr >= 4 || continue
+                    cr_mask = full_cols & ~cl_mask
+                    # GF(2) lower bounds: rank_GF2 ≤ rank_ℚ, so exceeding the
+                    # budget here rules the candidate out for certain.
+                    gB = _gf2_rank_capped(srow, rt_mask, cr_mask, max_sum + 1)
+                    gB > max_sum && continue
+                    gC = _gf2_rank_capped(srow, rb_mask, cl_mask, max_sum - gB + 1)
+                    gB + gC > max_sum && continue
+                    if !rows_built
+                        for i in 1:m
+                            if (rt_mask >> (i-1)) & 1 == 1; row_top[nt += 1] = i
+                            else;                            row_bot[nb += 1] = i; end
+                        end
+                        rows_built = true
+                    end
                     nl = 0; nr = 0
                     for j in 1:n
                         if (cl_mask >> (j-1)) & 1 == 1; col_left[nl += 1] = j
@@ -1496,10 +1555,13 @@ function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}):
     # Matrices beyond the 12×12 bipartition threshold would fall into the
     # matroid-intersection search, which enumerates ~C(m+n,4)² (S,T) pairs —
     # hours for a 14×14 matrix. When the smaller dimension is modest, the
-    # exact Ghouila-Houri partition test (O(3^min(m,n))) answers in seconds,
-    # so use it instead. Beyond that, the matroid search is the only option.
+    # exact branch-and-prune Ghouila-Houri test answers far faster: measured
+    # worst cases (dense TU matrices, which force exhaustion) are ~0.5s at
+    # min-dim 18, ~3s at 20, ~13s at 22; non-TU inputs usually exit in
+    # milliseconds. Beyond the cap, the matroid search is the only option —
+    # and impractically slow, see IMPLEMENTATION_NOTES.md.
     m, n = size(M)
-    if (m > 12 || n > 12) && min(m, n) <= 16
+    if (m > 12 || n > 12) && min(m, n) <= 24
         return _tu_partition(M)
     end
 
@@ -1643,8 +1705,11 @@ end
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CMR partition algorithm (Ghouila-Houri criterion)
-# Ports tuPartition / tuPartitionSubset / tuPartitionSearch from cmr/tu.c.
+# Partition algorithm (Ghouila-Houri criterion)
+# Originally a port of tuPartition / tuPartitionSubset / tuPartitionSearch from
+# cmr/tu.c; the subset and sign enumerations are now interleaved into a single
+# branch-and-prune search (see comments in _tu_partition), which is orders of
+# magnitude faster than the plain 3^r enumeration on typical inputs.
 # ──────────────────────────────────────────────────────────────────────────────
 
 function _tu_partition(M::Matrix{Int})::Bool
@@ -1668,42 +1733,72 @@ function _tu_partition(M::Matrix{Int})::Bool
         end
     end
 
-    # col_sum[j] = Σ_{i∈R} s[i]·M[i,j], s[i] ∈ {+1,−1}
-    # sel[i]: 0 = not in R,  +1 = in R sign +1,  −1 = in R sign −1
-    col_sum = zeros(Int, c)
-    sel     = zeros(Int8, r)
+    # Ghouila-Houri: TU ⟺ every row subset R admits a signing with all
+    # |column sums| ≤ 1. The subset choice and the sign search must stay
+    # SEPARATE phases: each subset picks its own signs, so the ∀R and ∃signs
+    # quantifiers cannot be interleaved into one in/out/± tree — subsets
+    # sharing a prefix would be forced to share sign choices, giving false
+    # negatives. (An interleaved variant passed 20k uniform random tests
+    # before a biased fuzz caught it — beware.)
+    #
+    # Within the sign search for a FIXED R, two sound accelerations apply:
+    #  * Branch-and-prune: proc_sum[j] = signed sum over already-signed rows,
+    #    rem_nnz[j] = nonzeros of column j among not-yet-signed selected
+    #    rows. Once |proc_sum[j]| > 1 + rem_nnz[j], no sign completion can
+    #    bring column j back within ≤ 1 — prune the branch. At the leaves
+    #    rem_nnz ≡ 0, so the invariant IS the Ghouila-Houri bound: no final
+    #    column scan is needed. Only columns touched by the current row can
+    #    become hopeless, keeping each node O(nnz(row)).
+    #  * Sign symmetry: negating a whole signing preserves |sums|, so the
+    #    first selected row takes +1 WLOG (halves the tree).
+    proc_sum = zeros(Int, c)
+    rem_nnz  = zeros(Int, c)     # over not-yet-signed SELECTED rows
+    sel_rows = Vector{Int}(undef, r)
+    ns = 0
 
-    # Search for a ±1 sign assignment for selected rows so |col_sum[j]| ≤ 1 ∀j.
-    # col_sum already reflects the initial (+1) signs for all rows in R.
-    function search(row::Int)::Bool
-        while row <= r && sel[row] == 0; row += 1; end
-        if row > r
-            for j in 1:c; -1 <= col_sum[j] <= 1 || return false; end
-            return true
+    # Sign search for sel_rows[k..ns]; proc_sum/rem_nnz reflect rows < k signed.
+    function search(k::Int)::Bool
+        k > ns && return true
+        row = sel_rows[k]
+        lo, hi = row_ptr[row] + 1, row_ptr[row + 1]
+        @inbounds for kk in lo:hi; rem_nnz[row_col[kk]] -= 1; end
+
+        good = true                                             # sign +1
+        @inbounds for kk in lo:hi
+            j = row_col[kk]
+            proc_sum[j] += row_val[kk]
+            abs(proc_sum[j]) > 1 + rem_nnz[j] && (good = false)
         end
-        search(row + 1) && return true                          # keep +1
-        for k in row_ptr[row]+1:row_ptr[row+1]                 # flip to −1
-            @inbounds col_sum[row_col[k]] -= 2row_val[k]; end
-        sel[row] = -1
-        found = search(row + 1)
-        sel[row] = 1
-        for k in row_ptr[row]+1:row_ptr[row+1]                 # restore
-            @inbounds col_sum[row_col[k]] += 2row_val[k]; end
-        found
+        found = good && search(k + 1)
+        @inbounds for kk in lo:hi; proc_sum[row_col[kk]] -= row_val[kk]; end
+
+        if !found && k > 1                                      # sign −1 (skip for first: +1 WLOG)
+            good = true
+            @inbounds for kk in lo:hi
+                j = row_col[kk]
+                proc_sum[j] -= row_val[kk]
+                abs(proc_sum[j]) > 1 + rem_nnz[j] && (good = false)
+            end
+            found = good && search(k + 1)
+            @inbounds for kk in lo:hi; proc_sum[row_col[kk]] += row_val[kk]; end
+        end
+
+        @inbounds for kk in lo:hi; rem_nnz[row_col[kk]] += 1; end
+        return found
     end
 
-    # Enumerate all 2^r subsets R; for each call search.
+    # Enumerate all 2^r subsets R (exclude-first: small violators found early);
+    # rem_nnz is maintained incrementally as rows join the subset.
     function enum_subsets(row::Int)::Bool
         row > r && return search(1)
-        sel[row] = 0                                            # exclude
-        enum_subsets(row + 1) || return false
-        sel[row] = 1                                            # include (sign +1)
+        enum_subsets(row + 1) || return false                   # exclude
+        ns += 1; sel_rows[ns] = row                             # include
         for k in row_ptr[row]+1:row_ptr[row+1]
-            @inbounds col_sum[row_col[k]] += row_val[k]; end
+            @inbounds rem_nnz[row_col[k]] += 1; end
         result = enum_subsets(row + 1)
         for k in row_ptr[row]+1:row_ptr[row+1]
-            @inbounds col_sum[row_col[k]] -= row_val[k]; end
-        sel[row] = 0
+            @inbounds rem_nnz[row_col[k]] -= 1; end
+        ns -= 1
         result
     end
 

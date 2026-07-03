@@ -101,10 +101,17 @@ The Seymour decomposition step (Theorem 20.2) has O((m+n)^8) worst-case
 complexity and becomes slow for larger matrices.
 
 For matrices beyond the 12×12 decomposition-search threshold whose smaller
-dimension is at most 16, the implementation switches to the exact
-Ghouila-Houri partition test (O(3^min(m,n))) — the matroid-intersection
-search at those sizes would take hours, while the partition test answers in
-seconds. Larger matrices still fall back to the matroid-intersection search.
+dimension is at most 24, the implementation switches to an exact
+branch-and-prune Ghouila-Houri partition test — the matroid-intersection
+search at those sizes would take hours to days, while the partition test
+answers in milliseconds for typical inputs (worst case ~seconds up to
+min-dimension 20, ~13s at 22). Only matrices whose smaller dimension
+exceeds 24 fall back to the matroid-intersection search.
+
+Inside the 12×12 decomposition search, candidate bipartitions are prefiltered
+by a word-parallel GF(2) rank bound (rank mod 2 never exceeds rational rank),
+which rejects the overwhelming majority of candidates in a few bit
+operations — about 20× faster on hard 12×12 inputs.
 
 Rank computations avoid floating-point SVD entirely: the hot paths use
 Float64 Gaussian elimination (exact for the small {-1,0,1} matrices arising
