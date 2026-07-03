@@ -113,6 +113,33 @@ by a word-parallel GF(2) rank bound (rank mod 2 never exceeds rational rank),
 which rejects the overwhelming majority of candidates in a few bit
 operations — about 20× faster on hard 12×12 inputs.
 
+### Benchmark: naive vs decomposition checker
+
+Representative matrices, timed after JIT warmup (Linux x86-64, Julia 1.12).
+The "path" column shows which stage of the algorithm decides the answer.
+
+| Matrix | Size | TU | naive | `is_totally_unimodular` | deciding path |
+|---|---|---|---|---|---|
+| identity | 3×3 | true | 2 µs | 15 µs | reduced to empty |
+| network matrix | 3×3 | true | 3 µs | 9 µs | network test |
+| K₃₃ | 5×4 | true | 14 µs | 61 µs | network test |
+| F₁ | 5×5 | true | 29 µs | 58 µs | special matrix (F₁/F₂) |
+| R10 | 5×5 | true | 25 µs | 534 µs | special matrix (F₁/F₂) |
+| R12 | 6×6 | true | 171 µs | 1.1 ms | decompose → pivot (Case 5/6) |
+| Fano | 3×4 | false | 6 µs | 36 µs | Eulerian k≤3 filter |
+| one_sum(K₃₃, K₃₃) | 10×8 | true | 11.7 ms | 86 µs | 1-sum component split |
+| two_sum(K₃₃, K₃₃ᵈ) | 8×8 | true | 3.2 ms | 295 µs | decompose → 2-sum (Case 2/3) |
+| CMR Eulerian test | 12×12 | false | 1.4 s | 2.3 s | decompose → 3-sum (Case 4) |
+| CMR partition test | 14×14 | false | 15.7 s | 17.5 ms | Ghouila-Houri (>12×12) |
+| 2-sum chain | 15×15 | true | — (infeasible) | 31 ms | Ghouila-Houri (>12×12) |
+| 2-sum chain | 22×22 | true | — (infeasible) | 5.8 s | Ghouila-Houri (>12×12) |
+
+For tiny matrices the naive checker wins on constant factors; the
+decomposition checker pulls ahead from ~8×8 and remains usable far beyond
+the naive checker's exponential wall. The 12×12 row is the worst case for
+the current implementation: exactly at the decomposition-search size limit,
+too small for the Ghouila-Houri routing.
+
 Rank computations avoid floating-point SVD entirely: the hot paths use
 Float64 Gaussian elimination (exact for the small {-1,0,1} matrices arising
 here) with rank caching, and exact Bareiss integer elimination elsewhere.
