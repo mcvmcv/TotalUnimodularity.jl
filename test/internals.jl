@@ -12,7 +12,7 @@ import TotalUnimodularity: _is_trivial_vector,
                             _build_gi, _find_disconnected_gi,
                             _compute_w_sets, _build_h, _is_network_matrix,
                             _split_submatrices, _decompose, _extract_rank1,
-                            _find_epsilon
+                            _find_epsilon, _det_int!
 
 # Known network matrix with ≥3 nonzeros per column
 const network_matrix = [1 0 1; -1 1 0; 0 -1 -1]
@@ -341,6 +341,33 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         @test all(x -> x in (-1, 0, 1), f2)
         @test all(x -> x in (0, 1), g2)
         @test f2 * g2 == B2
+
+        # Mixed-sign columns: B = f⊗g with g containing -1 entries
+        B3 = [1, 0, 1] * [1 -1 0 1]
+        f3, g3 = _extract_rank1(B3)
+        @test f3 * g3 == B3
+        @test g3 == [1 -1 0 1]
+
+        # Random rank-1 products round-trip exactly
+        rng = MersenneTwister(99)
+        for _ in 1:200
+            f = rand(rng, (-1, 0, 1), rand(rng, 2:5))
+            g = rand(rng, (-1, 0, 1), rand(rng, 2:5))
+            (any(!iszero, f) && any(!iszero, g)) || continue
+            B = f * g'
+            fx, gx = _extract_rank1(B)
+            @test fx * gx == B
+        end
+    end
+
+    @testset "_det_int!" begin
+        rng = MersenneTwister(7)
+        for _ in 1:500
+            n = rand(rng, 1:6)
+            M = rand(rng, (-1, 0, 1), n, n)
+            @test _det_int!(copy(M)) == round(Int, det(Rational{BigInt}.(M)))
+        end
+        @test _det_int!(zeros(Int, 0, 0)) == 1
     end
 
     @testset "_find_epsilon" begin

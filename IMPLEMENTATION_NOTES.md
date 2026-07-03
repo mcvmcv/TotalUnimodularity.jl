@@ -16,14 +16,19 @@ Rather than returning `Union{Matrix{Int}, Nothing}`, `_reduce` returns a
 `(Bool, Matrix{Int})` tuple for type stability. The `Bool` indicates whether
 all entries are in {-1, 0, 1}. This pattern is used consistently throughout.
 
-### `_extract_rank1` does NOT normalise
+### `_extract_rank1` does NOT normalise, and g is signed
 Early versions normalised f to have positive first entry (to ensure g is
 {0,+1}). This was wrong — negating f also negates the relationship between
 f and the columns of B, breaking the factorisation. The correct implementation
 takes f as the first nonzero column of B without any normalisation.
 
-Schrijver says f is a {0,+1} vector and g is {0,±1}, but in practice f
-is {0,±1} and g is {0,+1}. The text appears to have a typo.
+Both f and g are genuinely {0,±1}: a rank-1 {-1,0,1} matrix B = f⊗g can have
+columns equal to -f (where g[j] = -1). An earlier version assumed g ∈ {0,+1}
+and silently produced f⊗g ≠ B for such blocks, causing false negatives (e.g.
+a 2-sum whose glue row has mixed signs). `_extract_rank1` now sets
+g[j] ∈ {+1,-1,0} according to whether column j equals f, -f, or 0, and Case 4
+normalises the columns of A and D by g (in addition to normalising rows by f)
+to reach Schrijver's standard form (28).
 
 ### Case 4 normalisation
 Before applying the Case 4 formula, A and D must be normalised so that B
@@ -48,12 +53,16 @@ does not always produce a matrix that decomposes as Case 4 — instead,
 `_decompose` may find another Case 5 decomposition, leading to an infinite
 loop through a cycle of 4 equivalent matrices.
 
-The fix: maintain a `Set{Matrix{Int}}` of seen matrices throughout the
-recursion. If the same matrix is encountered again, return `false`.
+The fix: maintain a `Set{Matrix{Int}}` of the matrices on the *current
+recursion path*. If the same matrix is encountered again on the same path,
+return `false`. Each matrix is removed from the set when its subtree
+completes — an earlier version kept every visited matrix forever, which
+wrongly rejected identical matrices appearing in sibling branches (e.g.
+`one_sum(K33, K33)` returned `false` even though it is TU).
 
-Returning `false` on cycle detection is safe (no false positives confirmed
-on 2000 random matrices) but may give false negatives for TU matrices that
-trigger cycles. This is a known limitation.
+Returning `false` on a genuine cycle is safe (no false positives confirmed
+in randomised oracle testing) but may give false negatives for TU matrices
+that trigger cycles. This is a known limitation.
 
 ### `_is_trivial_vector` definition
 The initial implementation checked `count(!iszero, v) == 1 && all(x -> x in (0,1), v)`,
@@ -116,11 +125,40 @@ equal -f (the original f) rather than f (the negated f). The check
 `B[:,j] == f` failed for these columns, giving g = [0,0,...,0].
 **Fix:** Removed normalisation from `_extract_rank1`.
 
+### Bug 6: global `seen` set rejected duplicate sibling blocks
+**Symptom:** TU matrices with repeated blocks reported as non-TU, e.g.
+`one_sum(K33, K33)` → `false`.
+**Cause:** Cycle detection kept every visited matrix in `seen` forever, so
+the second occurrence of an identical block in a *sibling* branch (not a
+cycle) hit `M in seen → return false`.
+**Fix:** Path-based cycle detection — matrices are removed from `seen` when
+their subtree completes.
+
+### Bug 7: `_extract_rank1` assumed g ∈ {0,+1}
+**Symptom:** False negatives for 2-sums whose glue row has mixed signs, e.g.
+`two_sum(K33, K33d')` with a negated column of K33d.
+**Cause:** For B = f⊗g with g[j] = -1, column j of B equals -f; the old code
+set g[j] = 0, producing f⊗g ≠ B, and the Case 2/3/4 recursion then tested the
+wrong matrices.
+**Fix:** g[j] ∈ {+1,-1,0} by matching columns against ±f; Case 4 additionally
+normalises columns by g (see design note above).
+
 ## Known Limitations
 
 ### Performance
 `_decompose` has O((m+n)^8) complexity in the worst case. For matrices
 larger than approximately 8×10, it becomes slow.
+
+### Matrices beyond 12×12: partition shortcut
+The matroid-intersection fallback (`_decompose_matroid`) for matrices with
+m > 12 or n > 12 is effectively unusable in practice: for a 14×14 matrix it
+enumerates ~3.4×10⁸ (S,T) pairs and runs for hours (this stalled the test
+suite on the CMR 14×14 test matrices). `_is_tu_irreducible` therefore routes
+matrices with min(m,n) ≤ 16 to the exact Ghouila-Houri `_tu_partition` test
+(O(3^min(m,n)), seconds) before reaching the matroid search. Only matrices
+with both dimensions above 16 hit `_decompose_matroid` — and at those sizes
+it remains impractically slow. Making the decomposition search scale is the
+main open performance problem.
 
 The inner rank computation uses `_rank_int` (Bareiss integer elimination),
 which is ~18× faster than `LinearAlgebra.rank` (SVD) for the small {-1,0,1}

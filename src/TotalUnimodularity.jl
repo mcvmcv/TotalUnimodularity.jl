@@ -265,17 +265,49 @@ end
 # Significantly faster than LinearAlgebra.rank for small {-1,0,1} matrices.
 _rank_int(A::AbstractMatrix{Int})::Int = (size(A,1)==0 || size(A,2)==0) ? 0 : _rank_int!(Matrix{Int}(A))
 
+# Exact integer determinant via Bareiss elimination — in-place, destroys B.
+# The final pivot equals det(B); row swaps flip the sign. Intermediate values
+# are minors of B (Hadamard bound n^(n/2)), so no Int64 overflow for the
+# {-1,0,1} matrices up to ~15×15 that naive_is_totally_unimodular can handle.
+function _det_int!(B::Matrix{Int})::Int
+    n = size(B, 1)
+    n == 0 && return 1
+    sign = 1
+    prev = 1
+    for k in 1:n-1
+        if iszero(B[k, k])
+            prow = 0
+            for row in k+1:n
+                iszero(B[row, k]) || (prow = row; break)
+            end
+            prow == 0 && return 0
+            for c in 1:n; B[k,c], B[prow,c] = B[prow,c], B[k,c]; end
+            sign = -sign
+        end
+        for row in k+1:n
+            for c in k+1:n
+                B[row, c] = (B[k, k] * B[row, c] - B[row, k] * B[k, c]) ÷ prev
+            end
+            B[row, k] = 0
+        end
+        prev = B[k, k]
+    end
+    sign * B[n, n]
+end
+
 # Float64 Gaussian elimination with partial pivoting, in-place, destroys B.
-# For {-1,0,1} matrices with n ≤ ~20 rows/cols, this is exact: all intermediate
-# values are bounded by 2^(n-1) ≤ 524288 << 2^53, so no Float64 rounding errors.
-# Integer division (the slow step in Bareiss) is replaced by FP multiply-subtract,
-# giving a 3-5x speedup in practice.
+# Correct for {-1,0,1} matrices with n ≤ ~20 rows/cols: with partial pivoting,
+# entries stay ≤ 2^(n-1) in magnitude and legitimate nonzeros are rationals no
+# smaller than 2^-(n-1) ≈ 2e-6, while accumulated rounding noise on should-be-
+# zero entries stays below ~n·2^n·eps ≈ 5e-9. The 1e-7 pivot threshold sits
+# safely between the two. Integer division (the slow step in Bareiss) is
+# replaced by FP multiply-subtract, giving a 3-5x speedup in practice.
 function _rank_float!(B::Matrix{Float64})::Int
     m, n = size(B)
     r = 0
     @inbounds for col in 1:n
         prow = 0
-        best = 1e-10  # exact zeros stay 0.0; 1e-10 safely below any legitimate non-zero
+        best = 1e-7  # see threshold note above
         for row in r+1:m
             v = abs(B[row, col])
             if v > best; best = v; prow = row; end
@@ -303,7 +335,7 @@ end
 function _rank_float_view!(B::Matrix{Float64}, m::Int, n::Int)::Int
     r = 0
     @inbounds for col in 1:n
-        prow = 0; best = 1e-10
+        prow = 0; best = 1e-7  # see threshold note on _rank_float!
         for row in r+1:m
             v = abs(B[row, col])
             if v > best; best = v; prow = row; end
@@ -334,40 +366,6 @@ end
         buf[ri, ci] = M[rows[ri], cols[ci]]
     end
     _rank_float_view!(buf, nr, nc)
-end
-
-# Compute rank(IM[:, cols]) where IM = [I_m | M], exploiting the identity block:
-#   rank([I_m | M][:, cols]) = |I_cols| + rank(M[not_I_rows, M_cols])
-# Uses a UInt64 bitmask for covered rows — one heap allocation (the submatrix).
-function _rank_IM(M::Matrix{Int}, m::Int, cols::AbstractVector{Int})::Int
-    isempty(cols) && return 0
-    n_I = 0
-    n_M = 0
-    covered = zero(UInt64)
-    for c in cols
-        if c <= m
-            n_I += 1
-            covered |= UInt64(1) << (c - 1)
-        else
-            n_M += 1
-        end
-    end
-    n_M == 0 && return n_I
-    n_notI = m - n_I
-    n_notI == 0 && return m
-    B = Matrix{Int}(undef, n_notI, n_M)
-    row = 0
-    for i in 1:m
-        (covered >> (i - 1)) & 1 == 1 && continue
-        row += 1
-        col = 0
-        for c in cols
-            c <= m && continue
-            col += 1
-            B[row, col] = M[i, c - m]
-        end
-    end
-    n_I + _rank_int!(B)
 end
 
 # Cached wrappers: same result as _rank_IM(M, m, mask) but avoids recomputing
@@ -1159,11 +1157,10 @@ end
 """
     _extract_rank1(B)
 
-Extract f and g from a rank-1 matrix B = f⊗g, where f is a {0,±1} column
-vector and g is a {0,+1} row vector.
-
-Normalises f so that its first nonzero entry is positive, ensuring g is
-{0,+1} as required by Schrijver's Case 2 and Case 3.
+Extract f and g from a rank-1 matrix B = f⊗g, where f and g are {0,±1}
+vectors (f a column, g a row). f is the first nonzero column of B; since
+rank(B) = 1 and all entries are in {-1,0,1}, every nonzero column of B is
+either f or -f, so g[j] ∈ {+1,-1,0} accordingly and f⊗g == B exactly.
 
 # Reference
 Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.3, Case 2.
@@ -1172,12 +1169,13 @@ function _extract_rank1(B::Matrix{Int})
     m, n = size(B)
     col = findfirst(j -> any(!iszero, B[:, j]), 1:n)
     f = B[:, col]  # no normalisation
-    # g[j] = 1 if B[:,j] == f, 0 otherwise
-    # Since B = f⊗g with g {0,+1}, all nonzero columns of B equal f
+    negf = -f
     g = zeros(Int, 1, n)
     for j in 1:n
-        if B[:, j] == f
+        if @views B[:, j] == f
             g[1, j] = 1
+        elseif @views B[:, j] == negf
+            g[1, j] = -1
         end
     end
     return reshape(f, m, 1), g
@@ -1386,7 +1384,7 @@ square submatrix has determinant in {-1, 0, 1}.
 
 This algorithm is correct but has exponential time complexity in the size of
 `M`. It is intended for testing and validation only. See
-[`is_totally_unimodular`](@ref) for the linear-time implementation.
+[`is_totally_unimodular`](@ref) for the polynomial-time implementation.
 
 # Arguments
 - `M::Matrix{Int}`: An integer matrix whose entries must be in {-1, 0, 1};
@@ -1399,15 +1397,61 @@ function naive_is_totally_unimodular(M::Matrix{Int})
     all(m -> m in (-1, 0, 1), M) || return false
     r, c = size(M)
     for s in 1:min(r, c)
+        buf = Matrix{Int}(undef, s, s)
         for rows in combinations(1:r, s), cols in combinations(1:c, s)
-            @views det(M[rows, cols]) in (-1, 0, 1) || return false
+            for (cj, j) in enumerate(cols), (ri, i) in enumerate(rows)
+                buf[ri, cj] = M[i, j]
+            end
+            # Exact integer determinant — Float64 det could misreport ±1/0
+            # near the rounding threshold, and this is the test oracle.
+            _det_int!(buf) in (-1, 0, 1) || return false
         end
     end
     return true
 end
 
+"""
+    is_totally_unimodular(M)
+
+Test whether the integer matrix `M` is totally unimodular (TU), i.e. whether
+every square submatrix of `M` has determinant in {-1, 0, 1}, using the
+polynomial-time algorithm based on Seymour's decomposition theorem
+(Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.3).
+
+Any `AbstractMatrix` with integer-valued entries is accepted; entries outside
+{-1, 0, 1} make the matrix trivially non-TU, so `false` is returned.
+
+# Example
+```jldoctest
+julia> is_totally_unimodular([1 0 1 0; 0 1 1 0; 0 0 1 1])
+true
+
+julia> is_totally_unimodular([1 1 0; 1 0 1; 0 1 1])   # has a 3×3 det = -2
+false
+```
+
+Compare with [`naive_is_totally_unimodular`](@ref), which checks all square
+submatrix determinants directly (exponential time, used as a test oracle).
+"""
 function is_totally_unimodular(M::Matrix{Int})::Bool
     _is_tu_recursive(M, 0, Set{Matrix{Int}}())
+end
+
+# Convenience methods: accept any integer-valued matrix (Bool, Int8, views, …).
+# Entries outside {-1,0,1} mean non-TU, so reject before converting — this
+# also avoids InexactError for values that don't fit in Int.
+function _to_int_matrix(M::AbstractMatrix{<:Integer})::Union{Matrix{Int}, Nothing}
+    all(x -> -1 <= x <= 1, M) ? Matrix{Int}(M) : nothing
+end
+for f in (:is_totally_unimodular, :naive_is_totally_unimodular)
+    @eval function $f(M::AbstractMatrix{<:Integer})::Bool
+        N = _to_int_matrix(M)
+        N === nothing ? false : $f(N)
+    end
+end
+function cmr_is_totally_unimodular(M::AbstractMatrix{<:Integer}; kwargs...)::Bool
+    N = _to_int_matrix(M)
+    N === nothing ? false : cmr_is_totally_unimodular(N; kwargs...)
 end
 
 function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::Bool
@@ -1425,10 +1469,21 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::B
         end
     end
 
-    # Cycle detection
+    # Cycle detection: `seen` holds the matrices on the *current* recursion
+    # path only. Membership means the pivot cases (5/6) have cycled back to an
+    # ancestor, so this branch cannot make progress. Each matrix is removed
+    # once its subtree is done — identical matrices in sibling branches (e.g.
+    # duplicate blocks of a 1-sum) are legitimate and must not be rejected.
     M in seen && return false
-    push!(seen, copy(M))
+    push!(seen, M)
+    result = _is_tu_irreducible(M, depth, seen)
+    delete!(seen, M)
+    return result
+end
 
+# TU test for a matrix that is already reduced, connected, and not on the
+# current recursion path.
+function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::Bool
     _is_network_matrix(M) && return true
     _is_network_matrix(Matrix{Int}(M')) && return true
     _is_special_matrix(M) && return true
@@ -1437,6 +1492,16 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::B
     # (e.g. any 2×2 or 3×3 bad submatrix) in microseconds, before the O(4^m)
     # bipartition search runs.
     _tu_eulerian(M, 3) || return false
+
+    # Matrices beyond the 12×12 bipartition threshold would fall into the
+    # matroid-intersection search, which enumerates ~C(m+n,4)² (S,T) pairs —
+    # hours for a 14×14 matrix. When the smaller dimension is modest, the
+    # exact Ghouila-Houri partition test (O(3^min(m,n))) answers in seconds,
+    # so use it instead. Beyond that, the matroid search is the only option.
+    m, n = size(M)
+    if (m > 12 || n > 12) && min(m, n) <= 16
+        return _tu_partition(M)
+    end
 
     found, (A, B, C, D) = _decompose(M)
     found || return false
@@ -1490,17 +1555,28 @@ function _apply_decomposition(M::Matrix{Int},
         C_cols    = findall(!iszero, g_C[1, :])
         notB_rows = [i for i in 1:size(A, 1) if i ∉ B_rows]
         notC_cols = [j for j in 1:size(A, 2) if j ∉ C_cols]
-        A_norm = copy(A)
-        for i in B_rows
-            A_norm[i, :] *= f_B[i, 1]
-        end
         C_rows    = findall(!iszero, f_C[:, 1])
         B_cols    = findall(!iszero, g_B[1, :])
         notC_rows = [i for i in 1:size(D, 1) if i ∉ C_rows]
         notB_cols = [j for j in 1:size(D, 2) if j ∉ B_cols]
+        # Scale M so that both B and C become all-ones on their supports
+        # (Schrijver's standard form (28)): rows i ∈ B_rows by f_B[i], rows
+        # i ∈ C_rows by f_C[i], columns j ∈ C_cols by g_C[j], columns
+        # j ∈ B_cols by g_B[j]. Row scalings hit A/D rows; column scalings
+        # hit A's C_cols and D's B_cols. TU is invariant under ±1 scalings.
+        A_norm = copy(A)
+        for i in B_rows
+            A_norm[i, :] *= f_B[i, 1]
+        end
+        for j in C_cols
+            A_norm[:, j] *= g_C[1, j]
+        end
         D_norm = copy(D)
         for i in C_rows
             D_norm[i, :] *= f_C[i, 1]
+        end
+        for j in B_cols
+            D_norm[:, j] *= g_B[1, j]
         end
         A1 = A_norm[notB_rows, notC_cols]
         A2 = A_norm[notB_rows, C_cols   ]

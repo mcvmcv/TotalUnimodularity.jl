@@ -34,7 +34,49 @@ include("test_cmr.jl")
         @test is_totally_unimodular(Matrix{Int}(network_matrix'))
         @test is_totally_unimodular(Matrix{Int}(M3'))
     end
-    
+
+    @testset "generic integer matrix inputs" begin
+        M = [1 0 1 0; 0 1 1 0; 0 0 1 1]
+        @test is_totally_unimodular(Int8.(M))
+        @test is_totally_unimodular(M .== 1)            # BitMatrix
+        @test is_totally_unimodular(transpose(M))       # lazy wrapper
+        @test naive_is_totally_unimodular(Int32.(M))
+        @test !is_totally_unimodular([Int128(2)^70 0; 0 1])  # out-of-range entry
+    end
+
+    # Regression: `seen` used to be a global visited-set, so identical blocks
+    # in sibling branches (e.g. a 1-sum of a matrix with itself) were treated
+    # as cycles and wrongly reported non-TU. Cycle detection is now path-based.
+    @testset "duplicate blocks in sums" begin
+        @test is_totally_unimodular(one_sum(K33, K33))
+        @test is_totally_unimodular(one_sum(network_matrix, network_matrix))
+        @test is_totally_unimodular(one_sum(one_sum(network_matrix, network_matrix),
+                                            network_matrix))
+        @test is_totally_unimodular(one_sum(F_1, F_1))
+    end
+
+    # Regression: _extract_rank1 assumed every nonzero column of a rank-1
+    # block equals f, but B = f⊗g with g containing -1 entries has -f columns.
+    # A 2-sum whose glue row has mixed signs used to give false negatives.
+    # (All 32 column masks and 32 row masks were verified offline; a subset is
+    # tested here to keep suite runtime down. Mask 2 is the original failure.)
+    @testset "signed rank-1 glue blocks" begin
+        for mask in (2, 5, 21, 31)   # ±1 column scalings of the right summand
+            K33dx = copy(K33dual_twosum)
+            for j in 1:5
+                (mask >> (j - 1)) & 1 == 1 && (K33dx[:, j] .*= -1)
+            end
+            @test is_totally_unimodular(two_sum(K33, K33dx))
+        end
+        for mask in (0b00110, 0b10101)   # ±1 row scalings of the left summand
+            K33x = copy(K33)
+            for i in 1:5
+                (mask >> (i - 1)) & 1 == 1 && (K33x[i, :] .*= -1)
+            end
+            @test is_totally_unimodular(two_sum(K33x, K33dual_twosum))
+        end
+    end
+
     @testset "is_totally_unimodular vs naive (random, extended)" begin
         @info "Starting extended random tests..."
         flush(stderr)

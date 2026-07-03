@@ -4,22 +4,21 @@ version = "0.1.0"
 authors = ["Michael McVeagh <mcveagh@gmail.com>"]
 
 [deps]
-BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 Combinatorics = "861a8166-3701-5b0c-9a16-15d98fcdc6aa"
 Graphs = "86223c79-3864-5bf0-83f7-82e725a168b6"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
-Profile = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
-ProfileCanvas = "efd6af41-a80b-495e-886c-e51b0c7d77a3"
+
+[compat]
+Combinatorics = "1.1.0"
+Graphs = "1.14.0"
+LinearAlgebra = "1"
+Random = "1"
+Test = "1"
+julia = "1.10"
+
+[extras]
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
-[compat]
-BenchmarkTools = "1.8.0"
-Combinatorics = "1.1.0"
-Graphs = "1.14.0"
-LinearAlgebra = "1.12.0"
-Profile = "1.11.0"
-ProfileCanvas = "0.1.7"
-Random = "1.11.0"
-Test = "1.11.0"
-julia = "1.6"
+[targets]
+test = ["Test", "Random"]

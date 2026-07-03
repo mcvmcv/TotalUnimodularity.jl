@@ -45,6 +45,18 @@ is_totally_unimodular(M)   # true
 naive_is_totally_unimodular(M)   # true — checks all square submatrices
 ```
 
+### CMR-style algorithms
+
+`cmr_is_totally_unimodular` mirrors the CMR C library's `CMRtuTest` dispatcher
+and exposes two additional exponential-time (but exact) criteria alongside the
+default decomposition algorithm:
+
+```julia
+cmr_is_totally_unimodular(M)                          # Seymour decomposition
+cmr_is_totally_unimodular(M; algorithm=:eulerian)     # Camion's Eulerian criterion
+cmr_is_totally_unimodular(M; algorithm=:partition)    # Ghouila-Houri criterion
+```
+
 ### Seymour decomposition operations
 
 If A and B are both TU, so are their 1-sum, 2-sum, and 3-sum:
@@ -88,10 +100,17 @@ decisions and known issues.
 The Seymour decomposition step (Theorem 20.2) has O((m+n)^8) worst-case
 complexity and becomes slow for larger matrices.
 
-The implementation uses exact integer rank computation (Bareiss elimination)
-rather than floating-point SVD, giving roughly 18× faster rank calls and
-12× faster decomposition on typical 5×6 matrices. The random test suite
-(2000 matrices up to 5×6) completes in about 30 seconds.
+For matrices beyond the 12×12 decomposition-search threshold whose smaller
+dimension is at most 16, the implementation switches to the exact
+Ghouila-Houri partition test (O(3^min(m,n))) — the matroid-intersection
+search at those sizes would take hours, while the partition test answers in
+seconds. Larger matrices still fall back to the matroid-intersection search.
+
+Rank computations avoid floating-point SVD entirely: the hot paths use
+Float64 Gaussian elimination (exact for the small {-1,0,1} matrices arising
+here) with rank caching, and exact Bareiss integer elimination elsewhere.
+`is_totally_unimodular` accepts any `AbstractMatrix` with integer-valued
+entries.
 
 For verification on small matrices, `naive_is_totally_unimodular` is
 available but has exponential time complexity.
