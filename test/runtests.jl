@@ -75,15 +75,17 @@ include("test_cmr.jl")
         @test pivot(transpose(A), 1) == pivot(Matrix{Int}(A'), 1)
     end
 
+    # The regressions below are bugs in the Seymour decomposition code, so they
+    # use tu_both_routes (test_cmr.jl) to cover the :decomposition route too.
     # Regression: `seen` used to be a global visited-set, so identical blocks
     # in sibling branches (e.g. a 1-sum of a matrix with itself) were treated
     # as cycles and wrongly reported non-TU. Cycle detection is now path-based.
     @testset "duplicate blocks in sums" begin
-        @test is_totally_unimodular(one_sum(K33, K33))
-        @test is_totally_unimodular(one_sum(network_matrix, network_matrix))
-        @test is_totally_unimodular(one_sum(one_sum(network_matrix, network_matrix),
+        @test tu_both_routes(one_sum(K33, K33))
+        @test tu_both_routes(one_sum(network_matrix, network_matrix))
+        @test tu_both_routes(one_sum(one_sum(network_matrix, network_matrix),
                                             network_matrix))
-        @test is_totally_unimodular(one_sum(F_1, F_1))
+        @test tu_both_routes(one_sum(F_1, F_1))
     end
 
     # Regression: _extract_rank1 assumed every nonzero column of a rank-1
@@ -97,14 +99,14 @@ include("test_cmr.jl")
             for j in 1:5
                 (mask >> (j - 1)) & 1 == 1 && (K33dx[:, j] .*= -1)
             end
-            @test is_totally_unimodular(two_sum(K33, K33dx))
+            @test tu_both_routes(two_sum(K33, K33dx))
         end
         for mask in (0b00110, 0b10101)   # ±1 row scalings of the left summand
             K33x = copy(K33)
             for i in 1:5
                 (mask >> (i - 1)) & 1 == 1 && (K33x[i, :] .*= -1)
             end
-            @test is_totally_unimodular(two_sum(K33x, K33dual_twosum))
+            @test tu_both_routes(two_sum(K33x, K33dual_twosum))
         end
     end
 
@@ -139,8 +141,8 @@ include("test_cmr.jl")
                  0  1  1 -1  0  0  1  0]
         for M in (cyc1, cyc2, cyc3)
             @test naive_is_totally_unimodular(M)
-            @test is_totally_unimodular(M)
-            @test is_totally_unimodular(Matrix{Int}(M'))
+            @test tu_both_routes(M)
+            @test tu_both_routes(Matrix{Int}(M'))
         end
     end
 
@@ -159,8 +161,8 @@ include("test_cmr.jl")
                0  0 -1 -1  0  0 -1  1
                0  0  0  0 -1  1  0 -1]
         @test naive_is_totally_unimodular(M8)
-        @test is_totally_unimodular(M8)
-        @test is_totally_unimodular(Matrix{Int}(M8'))
+        @test tu_both_routes(M8)
+        @test tu_both_routes(Matrix{Int}(M8'))
         # The 12×11 fuzz input that reduces to M8 via a 2-sum.
         M12 = [ 0  0  0 -1  0  0  0  0  0 -1  0
                 0 -1  1  0  0  0  0  1  1  0  0
@@ -175,7 +177,7 @@ include("test_cmr.jl")
                 0  0 -1  0  0  0  0 -1 -1  0  1
                -1  1  0  0  0  0  0  0  0  0 -1]
         @test TotalUnimodularity._tu_partition(M12)
-        @test is_totally_unimodular(M12)
+        @test tu_both_routes(M12)
     end
 
     # An exception inside is_totally_unimodular fails these tests: it is a
@@ -187,9 +189,10 @@ include("test_cmr.jl")
             M = rand(rng, (-1, 0, 1), rand(rng, 2:5), rand(rng, 2:6))
             naive = naive_is_totally_unimodular(M)
             fast = is_totally_unimodular(M)
-            if naive != fast
+            decomp = cmr_is_totally_unimodular(M; algorithm=:decomposition)
+            if naive != fast || naive != decomp
                 n_bad += 1
-                @warn "DISAGREEMENT" trial M naive fast
+                @warn "DISAGREEMENT" trial M naive fast decomp
             end
         end
         @test n_bad == 0
@@ -204,9 +207,10 @@ include("test_cmr.jl")
             M = rand(rng, (-1, 0, 1), rand(rng, 5:8), rand(rng, 5:10))
             want = TotalUnimodularity._tu_partition(M)
             fast = is_totally_unimodular(M)
-            if want != fast
+            decomp = cmr_is_totally_unimodular(M; algorithm=:decomposition)
+            if want != fast || want != decomp
                 n_bad += 1
-                @warn "DISAGREEMENT" trial M want fast
+                @warn "DISAGREEMENT" trial M want fast decomp
             end
         end
         @test n_bad == 0
@@ -285,10 +289,11 @@ include("test_cmr.jl")
             M = rand(rng) < 0.85 ? composed() : biased()
             want = TotalUnimodularity._tu_partition(M)
             fast = is_totally_unimodular(M)
+            decomp = cmr_is_totally_unimodular(M; algorithm=:decomposition)
             n_tu += want
-            if want != fast
+            if want != fast || want != decomp
                 n_bad += 1
-                @warn "DISAGREEMENT" trial M want fast
+                @warn "DISAGREEMENT" trial M want fast decomp
             end
         end
         @test n_bad == 0

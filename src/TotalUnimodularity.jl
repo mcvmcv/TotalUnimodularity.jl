@@ -1458,9 +1458,16 @@ end
     is_totally_unimodular(M)
 
 Test whether the integer matrix `M` is totally unimodular (TU), i.e. whether
-every square submatrix of `M` has determinant in {-1, 0, 1}, using the
-polynomial-time algorithm based on Seymour's decomposition theorem
-(Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.3).
+every square submatrix of `M` has determinant in {-1, 0, 1}.
+
+After reduction and splitting into connected blocks, each block is tested for
+being a network matrix, the transpose of one, or one of the special matrices
+[`F_1`](@ref), [`F_2`](@ref) (Schrijver, *Theory of Linear and Integer
+Programming*, Theorems 20.1 and 20.3). Blocks that are none of these are
+decided by an exact branch-and-prune Ghouila-Houri test when their smaller
+dimension is at most 24, and by Seymour decomposition beyond that. To run the
+decomposition on small matrices as well, use
+`cmr_is_totally_unimodular(M; algorithm = :decomposition)`.
 
 Any `AbstractMatrix` with integer-valued entries is accepted; entries outside
 {-1, 0, 1} make the matrix trivially non-TU, so `false` is returned.
@@ -1478,7 +1485,7 @@ Compare with [`naive_is_totally_unimodular`](@ref), which checks all square
 submatrix determinants directly (exponential time, used as a test oracle).
 """
 function is_totally_unimodular(M::Matrix{Int})::Bool
-    _is_tu_recursive(M, 0, Set{Matrix{Int}}())
+    _is_tu_recursive(M, 0, Set{Matrix{Int}}(), true)
 end
 
 # Convenience methods: accept any integer-valued matrix (Bool, Int8, views, …).
@@ -1500,7 +1507,7 @@ function cmr_is_totally_unimodular(M::AbstractMatrix{<:Integer}; kwargs...)::Boo
     cmr_is_totally_unimodular(N === nothing ? fill(2, 1, 1) : N; kwargs...)
 end
 
-function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::Bool
+function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, fast::Bool)::Bool
     ok, M = _reduce(M)
     ok || return false
     (size(M, 1) == 0 || size(M, 2) == 0) && return true
@@ -1511,7 +1518,7 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::B
     # O(m·n) bipartite BFS — far cheaper than any subsequent step.
     let comps = _bipartite_components(M)
         if comps !== nothing
-            return all(((rows, cols),) -> _is_tu_recursive(M[rows, cols], depth+1, seen), comps)
+            return all(((rows, cols),) -> _is_tu_recursive(M[rows, cols], depth+1, seen, fast), comps)
         end
     end
 
@@ -1524,14 +1531,14 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::B
     # sibling branches (e.g. duplicate blocks of a 1-sum) are legitimate.
     M in seen && return _tu_partition(M)
     push!(seen, M)
-    result = _is_tu_irreducible(M, depth, seen)
+    result = _is_tu_irreducible(M, depth, seen, fast)
     delete!(seen, M)
     return result
 end
 
 # TU test for a matrix that is already reduced, connected, and not on the
 # current recursion path.
-function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::Bool
+function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, fast::Bool)::Bool
     _is_network_matrix(M) && return true
     _is_network_matrix(Matrix{Int}(M')) && return true
     _is_special_matrix(M) && return true
@@ -1541,16 +1548,21 @@ function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}):
     # bipartition search runs.
     _tu_eulerian(M, 3) || return false
 
-    # Matrices beyond the 12×12 bipartition threshold would fall into the
-    # matroid-intersection search, which enumerates ~C(m+n,4)² (S,T) pairs —
-    # hours for a 14×14 matrix. When the smaller dimension is modest, the
-    # exact branch-and-prune Ghouila-Houri test answers far faster: measured
-    # worst cases (dense TU matrices, which force exhaustion) are ~0.5s at
-    # min-dim 18, ~3s at 20, ~13s at 22; non-TU inputs usually exit in
-    # milliseconds. Beyond the cap, the matroid search is the only option —
-    # and impractically slow, see IMPLEMENTATION_NOTES.md.
+    # When the smaller dimension is modest, the exact branch-and-prune
+    # Ghouila-Houri test is the fastest route: measured worst cases (dense TU
+    # matrices, which force exhaustion) are ~0.5s at min-dim 18, ~3s at 20,
+    # ~13s at 22; non-TU inputs usually exit in milliseconds. It also beats
+    # the exhaustive ≤12×12 bipartition search (~4x in aggregate on composed
+    # inputs, seconds vs milliseconds in the worst case), so `fast` mode uses
+    # it there too; with `fast = false` those matrices take the Seymour
+    # decomposition path (cmr_is_totally_unimodular's :decomposition).
+    # Beyond 12×12 the alternative is the matroid-intersection search, which
+    # enumerates ~C(m+n,4)² (S,T) pairs — hours for a 14×14 matrix — so the
+    # partition test is used in both modes. Beyond the cap, the matroid
+    # search is the only option — and impractically slow, see
+    # IMPLEMENTATION_NOTES.md.
     m, n = size(M)
-    if (m > 12 || n > 12) && min(m, n) <= 24
+    if min(m, n) <= 24 && (fast || m > 12 || n > 12)
         return _tu_partition(M)
     end
 
@@ -1564,7 +1576,7 @@ function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}):
 
     rB = _rank_int(B)
     rC = _rank_int(C)
-    return _apply_decomposition(M, A, B, C, D, rB, rC, depth, seen)
+    return _apply_decomposition(M, A, B, C, D, rB, rC, depth, seen, fast)
 end
 
 # Dispatch on the rank case of a decomposition M = [A B; C D].
@@ -1575,19 +1587,19 @@ function _apply_decomposition(M::Matrix{Int},
                                A::Matrix{Int}, B::Matrix{Int},
                                C::Matrix{Int}, D::Matrix{Int},
                                rB::Int, rC::Int,
-                               depth::Int, seen::Set{Matrix{Int}})::Bool
+                               depth::Int, seen::Set{Matrix{Int}}, fast::Bool)::Bool
     if rB == 0 && rC == 0
-        return _is_tu_recursive(A, depth+1, seen) && _is_tu_recursive(D, depth+1, seen)
+        return _is_tu_recursive(A, depth+1, seen, fast) && _is_tu_recursive(D, depth+1, seen, fast)
 
     elseif rB == 1 && rC == 0
         f, g = _extract_rank1(B)
-        return _is_tu_recursive([A f], depth+1, seen) &&
-               _is_tu_recursive([g; D], depth+1, seen)
+        return _is_tu_recursive([A f], depth+1, seen, fast) &&
+               _is_tu_recursive([g; D], depth+1, seen, fast)
 
     elseif rB == 0 && rC == 1
         f, g = _extract_rank1(C)
-        return _is_tu_recursive([A; g], depth+1, seen) &&
-               _is_tu_recursive([f D], depth+1, seen)
+        return _is_tu_recursive([A; g], depth+1, seen, fast) &&
+               _is_tu_recursive([f D], depth+1, seen, fast)
 
     elseif rB == 1 && rC == 1
         # If the current partition is degenerate (A or D has trivial/dependent
@@ -1602,7 +1614,7 @@ function _apply_decomposition(M::Matrix{Int},
                 return _tu_partition(M)
             end
             rB2 = _rank_int(B2); rC2 = _rank_int(C2)
-            return _apply_decomposition(M, A2, B2, C2, D2, rB2, rC2, depth, seen)
+            return _apply_decomposition(M, A2, B2, C2, D2, rB2, rC2, depth, seen, fast)
         end
 
         f_B, g_B = _extract_rank1(B)
@@ -1662,8 +1674,8 @@ function _apply_decomposition(M::Matrix{Int},
         mat2 = [ε₁                   0                     ones(Int,1,nBK)       zeros(Int,1,nnotBK)
                 ones(Int,nCR,1)      ones(Int,nCR,1)       D1                    D2
                 zeros(Int,nnotCR,1)  zeros(Int,nnotCR,1)   D3                    D4   ]
-        return _is_tu_recursive(mat1, depth+1, seen) &&
-               _is_tu_recursive(mat2, depth+1, seen)
+        return _is_tu_recursive(mat1, depth+1, seen, fast) &&
+               _is_tu_recursive(mat2, depth+1, seen, fast)
 
     elseif rB == 2 && rC == 0
         pivot_pos = findfirst(!iszero, B)
@@ -1677,7 +1689,7 @@ function _apply_decomposition(M::Matrix{Int},
         M_perm = M_full[row_order, col_order]
         ok, M_prime = _reduce(pivot(M_perm, 1))
         ok || return false
-        return _is_tu_recursive(M_prime, depth+1, seen)
+        return _is_tu_recursive(M_prime, depth+1, seen, fast)
 
     elseif rB == 0 && rC == 2
         pivot_pos = findfirst(!iszero, C)
@@ -1693,7 +1705,7 @@ function _apply_decomposition(M::Matrix{Int},
         M_perm = M_full[row_order, col_order]
         ok, M_prime = _reduce(pivot(M_perm, 1))
         ok || return false
-        return _is_tu_recursive(M_prime, depth+1, seen)
+        return _is_tu_recursive(M_prime, depth+1, seen, fast)
 
     else
         error("Unexpected rank(B) + rank(C) = $(rB + rC)")
@@ -1911,7 +1923,9 @@ algorithms from the CMR library (`src/cmr/tu.c`, `CMRtuTest`):
 | `:eulerian`      | `CMR_TU_ALGORITHM_EULERIAN`      | Eulerian submatrix criterion      |
 | `:partition`     | `CMR_TU_ALGORITHM_PARTITION`     | Ghouila-Houri partition criterion |
 
-**`:decomposition`** delegates to [`is_totally_unimodular`](@ref).
+**`:decomposition`** runs the Seymour decomposition of Theorem 20.3 on blocks
+up to 12×12 (where [`is_totally_unimodular`](@ref) would use the faster
+Ghouila-Houri test); larger blocks are handled as in `is_totally_unimodular`.
 
 **`:eulerian`** — M is TU iff every square Eulerian submatrix (each row and column
 within it has an even number of nonzeros) has total entry sum ≡ 0 (mod 4).
@@ -1934,7 +1948,7 @@ function cmr_is_totally_unimodular(M::Matrix{Int};
                             "Use :decomposition, :eulerian, or :partition."))
     all(m -> m in (-1, 0, 1), M) || return false
     if algorithm === :decomposition
-        return is_totally_unimodular(M)
+        return _is_tu_recursive(M, 0, Set{Matrix{Int}}(), false)
     elseif algorithm === :eulerian
         return _tu_eulerian(M)
     else

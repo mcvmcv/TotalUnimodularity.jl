@@ -55,14 +55,15 @@ loop through a cycle of 4 equivalent matrices.
 
 The fix: maintain a `Set{Matrix{Int}}` of the matrices on the *current
 recursion path*. If the same matrix is encountered again on the same path,
-return `false`. Each matrix is removed from the set when its subtree
-completes — an earlier version kept every visited matrix forever, which
-wrongly rejected identical matrices appearing in sibling branches (e.g.
-`one_sum(K33, K33)` returned `false` even though it is TU).
+the decomposition has made no progress, so the matrix is decided exactly
+with `_tu_partition` instead. Each matrix is removed from the set when its
+subtree completes — an earlier version kept every visited matrix forever,
+which wrongly rejected identical matrices appearing in sibling branches
+(e.g. `one_sum(K33, K33)` returned `false` even though it is TU).
 
-Returning `false` on a genuine cycle is safe (no false positives confirmed
-in randomised oracle testing) but may give false negatives for TU matrices
-that trigger cycles. This is a known limitation.
+A cycle says nothing about total unimodularity. Until October 2026 the
+guard returned `false`, which produced false negatives on TU matrices (see
+Bug 8).
 
 ### `_is_trivial_vector` definition
 The initial implementation checked `count(!iszero, v) == 1 && all(x -> x in (0,1), v)`,
@@ -143,24 +144,50 @@ wrong matrices.
 **Fix:** g[j] ∈ {+1,-1,0} by matching columns against ±f; Case 4 additionally
 normalises columns by g (see design note above).
 
+### Bug 8: pivot-cycle guard reported TU matrices as non-TU
+**Symptom:** About 1 in 800 composed inputs (2-sums of F_1/F_2/K33/network
+blocks with random pivots and scalings) that are TU returned `false`.
+**Cause:** `_apply_decomposition` alternated between the degenerate 3-sum
+retry and a rank-2 pivot (Cases 5/6) and came back to a matrix already on
+the recursion path; the guard treated that as non-TU.
+**Fix:** on a cycle, decide the matrix with `_tu_partition`.
+
+### Bug 9: second Case 4 matrix assembled with misaligned blocks
+**Symptom:** About 1 in 6000 composed inputs that are TU returned `false`.
+**Cause:** the first row of `mat2` was written with block widths
+1, nBK, nnotBK, 1 while the rows below use 1, 1, nBK, nnotBK. The totals
+match, so the concatenation succeeded, but the 1s sat over the wrong columns
+of D whenever nBK ≠ nnotBK.
+**Fix:** `[ε₁ 0 ones(1,nBK) zeros(1,nnotBK)]`.
+
+Both were invisible to uniform random testing and to any single fuzz seed
+of a few thousand inputs; see "Structured fuzz" under Testing.
+
 ## Known Limitations
 
-### Performance
-`_decompose` has O((m+n)^8) complexity in the worst case. For matrices
-larger than approximately 8×10, it becomes slow.
+### Performance and routing
+No route is polynomial in practice. `_is_tu_irreducible` first runs the
+network, transpose-network and special-matrix tests and the Eulerian k ≤ 3
+pre-filter, then routes the block by size:
 
-### Matrices beyond 12×12: partition shortcut
-The matroid-intersection fallback (`_decompose_matroid`) for matrices with
-m > 12 or n > 12 is effectively unusable in practice: for a 14×14 matrix it
-enumerates ~3.4×10⁸ (S,T) pairs and runs for hours (this stalled the test
-suite on the CMR 14×14 test matrices). `_is_tu_irreducible` therefore routes
-matrices with min(m,n) ≤ 24 to the exact branch-and-prune Ghouila-Houri
-`_tu_partition` test before reaching the matroid search. Measured worst
-cases (dense TU inputs, which force full exhaustion): ~0.1s at min-dim 16,
-~0.5s at 18, ~3s at 20, ~13s at 22; non-TU inputs usually exit in
-milliseconds. Only matrices with both dimensions above 24 hit
-`_decompose_matroid` — impractically slow. Making the decomposition search
-scale is the main open performance problem.
+- min(m,n) ≤ 24: the exact branch-and-prune Ghouila-Houri `_tu_partition`
+  test. Measured worst cases (dense TU inputs, which force full exhaustion):
+  ~0.1s at min-dim 16, ~0.5s at 18, ~3s at 20, ~13s at 22; non-TU inputs
+  usually exit in milliseconds.
+- both dimensions > 24: `_decompose` → `_decompose_matroid`, O((m+n)^8).
+  It is effectively unusable: for a 14×14 matrix it enumerates ~3.4×10⁸
+  (S,T) pairs and runs for hours. Its Float64 rank routine is also only
+  argued exact up to ~20 rows.
+
+The exhaustive ≤12×12 bipartition search in `_decompose` is used only with
+`fast = false`, i.e. `cmr_is_totally_unimodular(M; algorithm=:decomposition)`.
+The default route skips it because `_tu_partition` is faster at every size
+measured: ~4× in aggregate on composed inputs, and 3 ms against 2.2 s on the
+12×12 CMR Eulerian test matrix. The decomposition code is kept correct by
+running every oracle and regression test through both routes.
+
+Making the separation search scale (Truemper/CMR-style) is the main open
+performance problem.
 
 ### Ghouila-Houri: keep subset choice and sign search separate
 `_tu_partition` enumerates subsets in an outer phase and searches signs in an
@@ -199,17 +226,12 @@ Further acceleration opportunities:
 - Pruning the outer S,T loop using matroid intersection theory
 - Caching rank computations for repeated column subsets
 
-### Cycle detection correctness
-Returning `false` on cycle detection is safe but conservative. A TU matrix
-that somehow triggers a cycle (which should not happen if the algorithm is
-correct but might due to implementation bugs) would be incorrectly reported
-as non-TU. No such case has been found in testing.
-
 ### Case 4 degeneracy handling
-Returning `false` when A or D is degenerate is conservative. In theory,
-a TU matrix could have a decomposition where A is degenerate but another
-valid non-degenerate decomposition also exists. `_decompose` returns the
-first decomposition found and does not search for non-degenerate alternatives.
+When the first rank(B) = rank(C) = 1 partition has a degenerate A or D,
+`_decompose` is retried with `reject_degenerate_3sum = true`. If no
+non-degenerate partition exists, or `_find_epsilon` finds no R–K path, the
+matrix is decided with `_tu_partition`. No fuzz input has reached either
+fallback from a non-degenerate start, so they are untested.
 
 ## Testing
 
@@ -218,8 +240,19 @@ first decomposition found and does not search for non-degenerate alternatives.
 Exponential time but correct. Used to verify `is_totally_unimodular`.
 
 ### Random testing
-- 2000 random {-1,0,1} matrices of size 2-5 × 2-6: 2000/2000 agree
-- Extended tests on larger matrices ongoing
+- 2000 uniform random {-1,0,1} matrices of size 2-5 × 2-6 against the naive
+  oracle, and 200 of size 5-8 × 5-10 against `_tu_partition`.
+- An exception in `is_totally_unimodular` fails the test.
+
+### Structured fuzz
+Uniform random matrices almost never reach the decomposition cases. The
+"structured fuzz" testset composes 1-/2-sums of F_1, F_2, K33, K33ᵀ and
+random network matrices with random permutations, ±1 scalings and pivots,
+flips one entry in about a third of them, and checks both routes against
+`_tu_partition`. The bugs it has found occur at rates of 1/800 to 1/6000,
+so the 2000 seeded inputs in the suite are a smoke test: after changing
+`_apply_decomposition`, `_decompose` or the recursion, run the generator
+over several seeds × ~8000 inputs.
 
 ### Known test matrices
 - `F_1`, `F_2`: TU, non-network, non-decomposable

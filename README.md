@@ -58,7 +58,7 @@ and exposes two additional exponential-time (but exact) criteria alongside the
 default decomposition algorithm:
 
 ```julia
-cmr_is_totally_unimodular(M)                          # Seymour decomposition
+cmr_is_totally_unimodular(M)                          # Seymour decomposition (blocks ≤ 12×12)
 cmr_is_totally_unimodular(M; algorithm=:eulerian)     # Camion's Eulerian criterion
 cmr_is_totally_unimodular(M; algorithm=:partition)    # Ghouila-Houri criterion
 ```
@@ -96,6 +96,10 @@ Programming* (Chapters 19–20), implementing Theorem 20.3:
    rank(B) + rank(C) ≤ 2 (Theorem 20.2), then recurse on the six cases
    of Theorem 20.3.
 
+By default, step 4 is replaced by an exact Ghouila-Houri partition test
+whenever the smaller dimension is at most 24, because it is faster in
+practice; see [Performance](#performance).
+
 See [THEORY.md](THEORY.md) for full mathematical details and
 [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for implementation
 decisions and known issues.
@@ -103,30 +107,26 @@ decisions and known issues.
 ## Performance
 
 `is_totally_unimodular` is practical when the smaller dimension of the
-(reduced) matrix is at most about 22, and takes one of three routes by size:
+(reduced) matrix is at most about 22. After the polynomial-time network and
+special-matrix tests and a cheap Eulerian pre-filter, a block that is still
+undecided is routed by size:
 
-- **Up to 12×12:** Seymour decomposition, with the separation found by
-  enumerating all row/column bipartitions (exponential, with heavy pruning;
-  worst case a few seconds at 12×12).
-- **Beyond 12×12, smaller dimension ≤ 24:** an exact branch-and-prune
-  Ghouila-Houri partition test.
-- **Both dimensions > 24:** the matroid-intersection separation search of
-  Theorem 20.2, O((m+n)^8) and impractically slow at these sizes.
+- **Smaller dimension ≤ 24:** an exact branch-and-prune Ghouila-Houri
+  partition test. It is exponential in the smaller dimension, but answers in
+  milliseconds for typical inputs (worst case ~seconds up to min-dimension
+  20, ~13s at 22).
+- **Both dimensions > 24:** Seymour decomposition with the
+  matroid-intersection separation search of Theorem 20.2, O((m+n)^8) and
+  impractically slow at these sizes.
 
-For matrices beyond the 12×12 decomposition-search threshold whose smaller
-dimension is at most 24, the implementation switches to an exact
-branch-and-prune Ghouila-Houri partition test — the matroid-intersection
-search at those sizes would take hours to days, while the partition test
-answers in milliseconds for typical inputs (worst case ~seconds up to
-min-dimension 20, ~13s at 22). Only matrices whose smaller dimension
-exceeds 24 fall back to the matroid-intersection search.
+`cmr_is_totally_unimodular(M; algorithm=:decomposition)` instead runs the
+Seymour decomposition on blocks up to 12×12, finding the separation by
+enumerating all row/column bipartitions with a word-parallel GF(2) rank
+prefilter (rank mod 2 never exceeds rational rank). It gives the same
+answers but is slower — about 4× in aggregate on composed inputs, and 2.2 s
+against 3 ms on the hardest 12×12 input below.
 
-Inside the 12×12 decomposition search, candidate bipartitions are prefiltered
-by a word-parallel GF(2) rank bound (rank mod 2 never exceeds rational rank),
-which rejects the overwhelming majority of candidates in a few bit
-operations — about 20× faster on hard 12×12 inputs.
-
-### Benchmark: naive vs decomposition checker
+### Benchmark: naive vs `is_totally_unimodular`
 
 Representative matrices, timed after JIT warmup (Linux x86-64, Julia 1.12).
 The "path" column shows which stage of the algorithm decides the answer.
@@ -138,20 +138,18 @@ The "path" column shows which stage of the algorithm decides the answer.
 | K₃₃ | 5×4 | true | 14 µs | 61 µs | network test |
 | F₁ | 5×5 | true | 29 µs | 58 µs | special matrix (F₁/F₂) |
 | R10 | 5×5 | true | 25 µs | 534 µs | special matrix (F₁/F₂) |
-| R12 | 6×6 | true | 171 µs | 1.1 ms | decompose → pivot (Case 5/6) |
+| R12 | 6×6 | true | 171 µs | 83 µs | Ghouila-Houri |
 | Fano | 3×4 | false | 6 µs | 36 µs | Eulerian k≤3 filter |
 | one_sum(K₃₃, K₃₃) | 10×8 | true | 11.7 ms | 86 µs | 1-sum component split |
-| two_sum(K₃₃, K₃₃ᵈ) | 8×8 | true | 3.2 ms | 295 µs | decompose → 2-sum (Case 2/3) |
-| CMR Eulerian test | 12×12 | false | 1.4 s | 2.3 s | decompose → 3-sum (Case 4) |
-| CMR partition test | 14×14 | false | 15.7 s | 17.5 ms | Ghouila-Houri (>12×12) |
-| 2-sum chain | 15×15 | true | — (infeasible) | 31 ms | Ghouila-Houri (>12×12) |
-| 2-sum chain | 22×22 | true | — (infeasible) | 5.8 s | Ghouila-Houri (>12×12) |
+| two_sum(K₃₃, K₃₃ᵈ) | 8×8 | true | 3.2 ms | 243 µs | Ghouila-Houri |
+| CMR Eulerian test | 12×12 | false | 1.4 s | 3.0 ms | Ghouila-Houri |
+| CMR partition test | 14×14 | false | 15.7 s | 17.5 ms | Ghouila-Houri |
+| 2-sum chain | 15×15 | true | — (infeasible) | 31 ms | Ghouila-Houri |
+| 2-sum chain | 22×22 | true | — (infeasible) | 5.8 s | Ghouila-Houri |
 
-For tiny matrices the naive checker wins on constant factors; the
-decomposition checker pulls ahead from ~8×8 and remains usable far beyond
-the naive checker's exponential wall. The 12×12 row is the worst case for
-the current implementation: exactly at the decomposition-search size limit,
-too small for the Ghouila-Houri routing.
+For tiny matrices the naive checker wins on constant factors;
+`is_totally_unimodular` pulls ahead from ~6×6 and remains usable far beyond
+the naive checker's exponential wall.
 
 Rank computations avoid floating-point SVD entirely: the hot paths use
 Float64 Gaussian elimination (exact for the small {-1,0,1} matrices arising

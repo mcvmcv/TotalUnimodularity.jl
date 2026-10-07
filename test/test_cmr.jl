@@ -32,11 +32,21 @@ const K33dual_onesum = [
   0  0  1  1  1
 ]
 
+# These tests target the Seymour decomposition code, which the default route
+# of is_totally_unimodular bypasses for small matrices. Run both routes; they
+# must agree.
+function tu_both_routes(M)
+    fast   = is_totally_unimodular(M)
+    decomp = cmr_is_totally_unimodular(M; algorithm=:decomposition)
+    fast == decomp || error("routes disagree: default=$fast, :decomposition=$decomp")
+    fast
+end
+
 @testset "CMR TU tests" begin
 
   @testset "EulerianAlgorithm" begin
     # Sub-case 1: 2-sum of K_{3,3} and its dual → TU.
-    @test is_totally_unimodular(two_sum(K33, K33dual_twosum))
+    @test tu_both_routes(two_sum(K33, K33dual_twosum))
 
     # Sub-case 2: 12×12 non-TU matrix.
     M = [
@@ -53,12 +63,12 @@ const K33dual_onesum = [
       0 0 0 0 0 0 0 0 0 1 1 0
       0 0 0 0 0 0 0 0 0 0 1 1
     ]
-    @test !is_totally_unimodular(M)
+    @test !tu_both_routes(M)
   end
 
   @testset "PartitionAlgorithm" begin
     # Sub-case 1: 2-sum of K_{3,3} and its dual → TU.
-    @test is_totally_unimodular(two_sum(K33, K33dual_twosum))
+    @test tu_both_routes(two_sum(K33, K33dual_twosum))
 
     # Sub-case 2: 14×14 non-TU matrix.
     M = [
@@ -77,20 +87,20 @@ const K33dual_onesum = [
       0 0 0 0 0 0 0 0  0 0 0 1 1 0
       0 0 0 0 0 0 0 0  0 0 0 0 1 1
     ]
-    @test !is_totally_unimodular(M)
+    @test !tu_both_routes(M)
   end
 
   @testset "Onesum" begin
     # 1-sum (block diagonal) of K_{3,3} and its dual → TU.
-    @test is_totally_unimodular(one_sum(K33, K33dual_onesum))
+    @test tu_both_routes(one_sum(K33, K33dual_onesum))
   end
 
   @testset "SeriesParallelTwoSeparation" begin
-    @test is_totally_unimodular(two_sum(K33, K33dual_twosum))
+    @test tu_both_routes(two_sum(K33, K33dual_twosum))
   end
 
   @testset "NestedMinorSearchTwoSeparation" begin
-    @test is_totally_unimodular(two_sum(K33, K33dual_twosum))
+    @test tu_both_routes(two_sum(K33, K33dual_twosum))
   end
 
   @testset "NestedMinorSearchTwoSeparationViolator" begin
@@ -104,7 +114,7 @@ const K33dual_onesum = [
        1  1 -1  0  0  0  1  1
        0  0  0  0  0 -1  1  1
     ]
-    @test !is_totally_unimodular(M)
+    @test !tu_both_routes(M)
   end
 
   # The NestedMinorPivots tests exercise specific decomposition paths in CMR.
@@ -120,7 +130,7 @@ const K33dual_onesum = [
       0 0 0 1 1 0
       0 1 1 1 0 0
     ]
-    @test !is_totally_unimodular(M)
+    @test !tu_both_routes(M)
   end
 
   @testset "NestedMinorPivotsTwoRowsOneColumn" begin
@@ -133,7 +143,7 @@ const K33dual_onesum = [
       0 0 0 1 1 0
       0 1 1 1 0 0
     ]
-    @test !is_totally_unimodular(M)
+    @test !tu_both_routes(M)
   end
 
   @testset "NestedMinorPivotsOneRowTwoColumns" begin
@@ -145,7 +155,7 @@ const K33dual_onesum = [
       0 0 0 0 1 1 0
       0 0 0 1 1 0 0
     ]
-    @test !is_totally_unimodular(M)
+    @test !tu_both_routes(M)
   end
 
   @testset "NestedMinorPivotsTwoSeparation" begin
@@ -162,7 +172,7 @@ const K33dual_onesum = [
       0 1 1 0 0 0 0 0 1 0 0
       0 0 0 0 0 0 0 0 0 1 1
     ]
-    @test !is_totally_unimodular(M)
+    @test !tu_both_routes(M)
   end
 
   @testset "SeqGraphicWheel" begin
@@ -175,7 +185,7 @@ const K33dual_onesum = [
       0 0 0 1 1 0
       0 0 0 0 1 1
     ]
-    @test is_totally_unimodular(M1)
+    @test tu_both_routes(M1)
 
     # Four 4×4 graphic matrices
     M2 = [
@@ -184,7 +194,7 @@ const K33dual_onesum = [
       0  1  1  1
       0  0  1  1
     ]
-    @test is_totally_unimodular(M2)
+    @test tu_both_routes(M2)
 
     M3 = [
       1 1 1 0
@@ -192,7 +202,7 @@ const K33dual_onesum = [
       0 1 1 1
       0 0 1 1
     ]
-    @test is_totally_unimodular(M3)
+    @test tu_both_routes(M3)
 
     M4 = [
       1 0 1 0
@@ -200,7 +210,7 @@ const K33dual_onesum = [
       0 1 1 1
       0 0 1 1
     ]
-    @test is_totally_unimodular(M4)
+    @test tu_both_routes(M4)
 
     M5 = [
       1 0 1 0
@@ -208,7 +218,7 @@ const K33dual_onesum = [
       1 1 1 1
       0 0 1 1
     ]
-    @test is_totally_unimodular(M5)
+    @test tu_both_routes(M5)
   end
 
   @testset "SeqGraphicOneRowOneColumn" begin
@@ -221,7 +231,7 @@ const K33dual_onesum = [
       0 0 1 1 1 0 0
       0 0 0 0 1 0 1
     ]
-    @test is_totally_unimodular(M)
+    @test tu_both_routes(M)
   end
 
   @testset "SeqGraphicTwoRowsOneColumn" begin
@@ -235,7 +245,7 @@ const K33dual_onesum = [
       0  0  0  1  0  1
       0  0  0  0 -1  1
     ]
-    @test is_totally_unimodular(M)
+    @test tu_both_routes(M)
   end
 
   @testset "SeqGraphicOneRowTwoColumns" begin
@@ -247,7 +257,7 @@ const K33dual_onesum = [
       0  0  0  0  1  1  1  1
       0  0  0  0  0  0  1  1
     ]
-    @test is_totally_unimodular(M)
+    @test tu_both_routes(M)
   end
 
   @testset "SeqGraphicnOneColumn" begin
@@ -259,7 +269,7 @@ const K33dual_onesum = [
       0 0 0 1 1 0
       0 0 1 1 1 1
     ]
-    @test is_totally_unimodular(M)
+    @test tu_both_routes(M)
   end
 
   @testset "SeqGraphicOneRow" begin
@@ -272,7 +282,7 @@ const K33dual_onesum = [
       0  1  0  0  1
       0  1  1  0  0
     ]
-    @test is_totally_unimodular(M1)
+    @test tu_both_routes(M1)
 
     # Sub-case 5: 5×5 graphic → TU
     M5 = [
@@ -282,7 +292,7 @@ const K33dual_onesum = [
       1  0  0 -1  0
       0  1  1  1  1
     ]
-    @test is_totally_unimodular(M5)
+    @test tu_both_routes(M5)
 
     # Sub-cases 2–4: the CMR test checks graphicness only (not TU directly).
     # We include them here as known non-graphic but potentially-TU matrices;
@@ -298,7 +308,7 @@ const K33dual_onesum = [
       0 0 1 1 1
       1 1 1 1 1
     ]
-    @test is_totally_unimodular(M1)
+    @test tu_both_routes(M1)
 
     # Alternative signing of R10
     M2 = [
@@ -308,7 +318,7 @@ const K33dual_onesum = [
       0  0  1  1  1
       1  0  0  1  1
     ]
-    @test is_totally_unimodular(M2)
+    @test tu_both_routes(M2)
   end
 
   @testset "EnumerateRanksZeroTwo" begin
@@ -318,7 +328,7 @@ const K33dual_onesum = [
       0 0 1 1
       0 1 1 1
     ]
-    @test !is_totally_unimodular(M)
+    @test !tu_both_routes(M)
   end
 
   @testset "EnumerateRanksOneOne" begin
@@ -328,7 +338,7 @@ const K33dual_onesum = [
       1 0 0 1
       1 1 0 0
     ]
-    @test !is_totally_unimodular(M)
+    @test !tu_both_routes(M)
   end
 
   @testset "EnumerateRanksTwoZero" begin
@@ -339,7 +349,7 @@ const K33dual_onesum = [
       1 1 1 1 1
       1 0 0 0 1
     ]
-    @test !is_totally_unimodular(M)
+    @test !tu_both_routes(M)
   end
 
   @testset "R12 (DeltasumR12 / YsumR12 / ThreesumR12)" begin
@@ -352,7 +362,7 @@ const K33dual_onesum = [
       1  0  1  0  1  0
       0 -1  0 -1  0  1
     ]
-    @test is_totally_unimodular(M)
+    @test tu_both_routes(M)
   end
 
   @testset "ThreesumForbiddenSubmatrix" begin
@@ -373,7 +383,7 @@ const K33dual_onesum = [
       0 0 0 0 0 0 0 0 0 0 0 1 1 0
       0 0 0 0 0 0 0 0 0 0 0 0 1 1
     ]
-    @test !is_totally_unimodular(M)
+    @test !tu_both_routes(M)
   end
 
   @testset "Fano" begin
@@ -383,7 +393,7 @@ const K33dual_onesum = [
       0 1 1 1
       1 0 1 1
     ]
-    @test !is_totally_unimodular(M)
+    @test !tu_both_routes(M)
   end
 
   @testset "FanoDual" begin
@@ -394,7 +404,7 @@ const K33dual_onesum = [
       1 0 1
       1 1 1
     ]
-    @test !is_totally_unimodular(M)
+    @test !tu_both_routes(M)
   end
 
   @testset "ThreesumPivotHighRank" begin
@@ -408,7 +418,7 @@ const K33dual_onesum = [
       1  1  0 -1  0  0  1
       0  0  0  1  1  0  0
     ]
-    @test !is_totally_unimodular(M1)
+    @test !tu_both_routes(M1)
 
     # 10×10 — not TU
     M2 = [
@@ -423,7 +433,7 @@ const K33dual_onesum = [
        0 -1  0  1  0  0  0  1  0  0
        0  0  0  1  1 -1  0  1  0  0
     ]
-    @test !is_totally_unimodular(M2)
+    @test !tu_both_routes(M2)
   end
 
   @testset "CompleteTree" begin
@@ -439,7 +449,7 @@ const K33dual_onesum = [
       0  0  0  0  0  1 -1  1
       0  0  0  0  1  1  1  0
     ]
-    @test !is_totally_unimodular(M1)
+    @test !tu_both_routes(M1)
 
     M2 = [
       1  1  0  1  0  0  0  0
@@ -451,7 +461,7 @@ const K33dual_onesum = [
       0  0  0  0  0  1 -1  1
       0  0  0  0  1  1  1  0
     ]
-    @test !is_totally_unimodular(M2)
+    @test !tu_both_routes(M2)
 
     M3 = [
       1  1  0  0  0  0  0  0
@@ -463,7 +473,7 @@ const K33dual_onesum = [
       0  0  0  0  0  1 -1  1
       0  0  0  0  1  1  1  0
     ]
-    @test !is_totally_unimodular(M3)
+    @test !tu_both_routes(M3)
 
     M4 = [
       1  0  1  1  0  0  0  0
@@ -475,7 +485,7 @@ const K33dual_onesum = [
       0  0  0  0  0  1 -1  1
       0  0  0  0  1  1  1  0
     ]
-    @test !is_totally_unimodular(M4)
+    @test !tu_both_routes(M4)
 
     M6 = [
       1  1  0  0  0  0  0  0  0  0
@@ -491,7 +501,7 @@ const K33dual_onesum = [
       0  0  0  0  0  0  0  1 -1  1
       0  0  0  0  0  0  1  1  1  0
     ]
-    @test !is_totally_unimodular(M6)
+    @test !tu_both_routes(M6)
 
     M7 = [
       -1  0  0  1  1  0  0  0  0
@@ -504,7 +514,7 @@ const K33dual_onesum = [
        0  0  0  0  0  0  1 -1  1
        0  0  0  0  0  1  1  1  0
     ]
-    @test !is_totally_unimodular(M7)
+    @test !tu_both_routes(M7)
 
     M8 = [
       1  1  0  1  0  0  0  0
@@ -516,7 +526,7 @@ const K33dual_onesum = [
       0  0  0  0  0  1  1  1
       0  0  0  0  1  1  1  0
     ]
-    @test !is_totally_unimodular(M8)
+    @test !tu_both_routes(M8)
   end
 
 end
