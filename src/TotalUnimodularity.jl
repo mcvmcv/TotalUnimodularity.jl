@@ -144,11 +144,12 @@ function _is_special_matrix(M::Matrix{Int})
     # The multiset of absolute row sums is invariant under sign/permutation equivalence.
     # F_1 has profile [3,3,3,3,3]; F_2 has profile [3,3,3,3,5].
     # This O(n) check rejects most non-equivalent matrices before the O(14400) loop.
-    row_abs_sums = sort(ntuple(i -> sum(abs, @view M[i,:]), 5))
-    if row_abs_sums == (3,3,3,3,3)
+    # (sort on a Vector: sort(::NTuple) needs Julia ≥ 1.12.)
+    row_abs_sums = sort!([sum(abs, @view M[i,:]) for i in 1:5])
+    if row_abs_sums == [3,3,3,3,3]
         _is_sign_and_permutation_equivalent(M, F_1) && return true
     end
-    if row_abs_sums == (3,3,3,3,5)
+    if row_abs_sums == [3,3,3,3,5]
         _is_sign_and_permutation_equivalent(M, F_2) && return true
     end
     return false
