@@ -4,7 +4,7 @@ using Graphs
 import TotalUnimodularity: _tu_partition, _gf2_rank_capped,
                             _is_trivial_vector,
                             _is_special_matrix, _drop_trivial_vectors,
-                            _reduce_trivial_vectors, _has_dependent_rows,
+                            _has_dependent_rows,
                             _has_dependent_cols, _has_dependent_vectors,
                             _drop_dependent_rows, _drop_dependent_cols,
                             _drop_dependent_vectors, _reduce,

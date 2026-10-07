@@ -50,9 +50,29 @@ include("test_cmr.jl")
         @test_throws ArgumentError cmr_is_totally_unimodular([2 0; 0 1]; algorithm=:bogus)
         @test_throws ArgumentError cmr_is_totally_unimodular(Int8[2 0; 0 1]; algorithm=:bogus)
         @test !cmr_is_totally_unimodular(Int8[2 0; 0 1]; algorithm=:partition)
+        # pivot: k out of range, or leading block not unimodular.
+        @test_throws ArgumentError pivot([1 1; 1 1], 3)
+        @test_throws ArgumentError pivot([1 1; 1 1], -1)
+        @test_throws ArgumentError pivot([0 1; 1 1], 1)
+        @test_throws ArgumentError pivot([1 1; 1 1], 2)
+        @test pivot([1 1; 1 0], 1) == [-1 1; 1 -1]
+        @test pivot([1 1; 1 0], 2) == -[0 1; 1 -1]
         # 3-sum summands too small to contain Am / Bm.
         @test_throws ErrorException three_sum([1 1; 0 1], [1 0 1; 1 1 0])
         @test_throws ErrorException three_sum([1 1 1; 1 0 1], [1 0; 1 1])
+    end
+
+    @testset "generic integer matrix inputs (sums and pivot)" begin
+        A = [1 0 1; -1 1 0; 0 -1 -1]
+        B = [1 1 0; 1 0 1; 1 -1 1]
+        @test one_sum(Int8.(A), B) == one_sum(A, B)
+        @test two_sum(A, Int8.(B)) == two_sum(A, B)
+        @test two_sum(transpose(A), view(B, :, :)) == two_sum(Matrix{Int}(A'), B)
+        A3 = [1 1 1; 1 0 1]
+        B3 = [1 0 1; 1 1 0]
+        @test three_sum(Int8.(A3), B3 .== 1) == three_sum(A3, B3)
+        @test pivot(Int8.(A), 1) == pivot(A, 1)
+        @test pivot(transpose(A), 1) == pivot(Matrix{Int}(A'), 1)
     end
 
     # Regression: `seen` used to be a global visited-set, so identical blocks

@@ -63,15 +63,6 @@ function _drop_trivial_vectors(M::Matrix{Int}, dim::Int)
     return dim == 1 ? M[mask, :] : M[:, mask]
 end
 
-# Repeatedly drop trivial rows and columns until the matrix stabilises.
-function _reduce_trivial_vectors(M::Matrix{Int})
-    while true
-        N = _drop_trivial_vectors(_drop_trivial_vectors(M, 1), 2)
-        N == M && return M
-        M = N
-    end
-end
-
 # Check if matrix M is equivalent to target under ±1 row/column scalings
 # and row/column permutations. Assumes M and target are both 5×5 {-1,0,1} matrices.
 function _is_sign_and_permutation_equivalent(M::Matrix{Int}, target::Matrix{Int})
@@ -302,33 +293,7 @@ end
 # zero entries stays below ~n·2^n·eps ≈ 5e-9. The 1e-7 pivot threshold sits
 # safely between the two. Integer division (the slow step in Bareiss) is
 # replaced by FP multiply-subtract, giving a 3-5x speedup in practice.
-function _rank_float!(B::Matrix{Float64})::Int
-    m, n = size(B)
-    r = 0
-    @inbounds for col in 1:n
-        prow = 0
-        best = 1e-7  # see threshold note above
-        for row in r+1:m
-            v = abs(B[row, col])
-            if v > best; best = v; prow = row; end
-        end
-        prow == 0 && continue
-        r += 1
-        if prow != r
-            for c in 1:n; B[r,c], B[prow,c] = B[prow,c], B[r,c]; end
-        end
-        pivot = B[r, col]
-        for row in r+1:m
-            factor = B[row, col] / pivot
-            for c in col+1:n
-                B[row, c] -= factor * B[r, c]
-            end
-            B[row, col] = 0.0
-        end
-        r == m && break
-    end
-    r
-end
+_rank_float!(B::Matrix{Float64})::Int = _rank_float_view!(B, size(B, 1), size(B, 2))
 
 # Gaussian elimination on B[1..m, 1..n] — works on the leading m×n block of a
 # pre-allocated scratch buffer, so no heap allocation.
@@ -816,13 +781,19 @@ This operation preserves total unimodularity and is central to Seymour
 decomposition.
 
 # Arguments
-- `M::Matrix{Int}`: An integer matrix whose entries are in {-1, 0, 1}.
-- `k::Int`: Size of the leading square submatrix to pivot on.
+- `M`: An integer matrix whose entries are in {-1, 0, 1}.
+- `k::Int`: Size of the leading square submatrix to pivot on. An
+  `ArgumentError` is thrown if `k` is out of range or the leading k×k
+  submatrix does not have determinant ±1.
 
 # Reference
 Schrijver, *Theory of Linear and Integer Programming*, Chapter 20.
 """
 function pivot(M::Matrix{Int}, k::Int)
+    0 <= k <= min(size(M)...) ||
+        throw(ArgumentError("k = $k must be between 0 and min(size(M)) = $(min(size(M)...))."))
+    abs(_det_int!(M[1:k, 1:k])) == 1 ||
+        throw(ArgumentError("The leading $k×$k submatrix must have determinant ±1."))
     @views E = M[1:k,     1:k    ]
     @views B = M[k+1:end, 1:k    ]
     @views C = M[1:k,     k+1:end]
@@ -831,6 +802,8 @@ function pivot(M::Matrix{Int}, k::Int)
     [-Einv        Einv*C
       B*Einv  D - B*Einv*C]
 end
+
+pivot(M::AbstractMatrix{<:Integer}, k::Integer) = pivot(Matrix{Int}(M), Int(k))
 
 """
     _decompose(M)
@@ -1437,6 +1410,12 @@ function three_sum(A::Matrix{Int}, B::Matrix{Int})
     return C
 end
 
+# Convenience methods: accept any integer matrices (Int8, adjoints, views, …).
+for f in (:one_sum, :two_sum, :three_sum)
+    @eval $f(A::AbstractMatrix{<:Integer}, B::AbstractMatrix{<:Integer}) =
+        $f(Matrix{Int}(A), Matrix{Int}(B))
+end
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Total unimodularity tests
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1522,11 +1501,11 @@ function cmr_is_totally_unimodular(M::AbstractMatrix{<:Integer}; kwargs...)::Boo
 end
 
 function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::Bool
-    depth > 100 && error("Maximum recursion depth exceeded")
-
     ok, M = _reduce(M)
     ok || return false
     (size(M, 1) == 0 || size(M, 2) == 0) && return true
+    # Runaway recursion says nothing about M; decide it exactly instead.
+    depth > 100 && return _tu_partition(M)
 
     # 1-sum: split into connected components and test each independently.
     # O(m·n) bipartite BFS — far cheaper than any subsequent step.
@@ -1576,7 +1555,12 @@ function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}):
     end
 
     found, (A, B, C, D) = _decompose(M)
-    found || return false
+    if !found
+        # The ≤12×12 bipartition search is exhaustive, so by Seymour's theorem
+        # no separation means not TU. The matroid search may miss separations,
+        # so its failure proves nothing — decide exactly instead.
+        return (m <= 12 && n <= 12) ? false : _tu_partition(M)
+    end
 
     rB = _rank_int(B)
     rC = _rank_int(C)
@@ -1612,10 +1596,10 @@ function _apply_decomposition(M::Matrix{Int},
         if _is_degenerate(A) || _is_degenerate(D)
             found2, (A2, B2, C2, D2) = _decompose(M; reject_degenerate_3sum = true)
             if !found2
-                # Every rB+rC≤2 partition has degenerate A/D. For small matrices,
-                # fall back to the partition algorithm (exponential but correct).
-                size(M, 1) <= 12 && size(M, 2) <= 12 && return _tu_partition(M)
-                return false
+                # Every rB+rC≤2 partition found has degenerate A/D, which rules
+                # out the 3-sum construction but not TU. Fall back to the
+                # partition algorithm (exponential but exact).
+                return _tu_partition(M)
             end
             rB2 = _rank_int(B2); rC2 = _rank_int(C2)
             return _apply_decomposition(M, A2, B2, C2, D2, rB2, rC2, depth, seen)
@@ -1660,7 +1644,8 @@ function _apply_decomposition(M::Matrix{Int},
         D4 = D_norm[notC_rows, notB_cols]
         ok1, ε₁ = _find_epsilon(A_norm, B_rows, C_cols)
         ok2, ε₂ = _find_epsilon(D_norm, C_rows, B_cols)
-        (ok1 && ok2) || return false
+        # No R–K path means ε is undetermined, not that M is non-TU.
+        (ok1 && ok2) || return _tu_partition(M)
         nR     = length(B_rows)
         nK     = length(C_cols)
         nnotR  = length(notB_rows)
