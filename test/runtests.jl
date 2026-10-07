@@ -144,6 +144,40 @@ include("test_cmr.jl")
         end
     end
 
+    # Regression: the second Case 4 (3-sum) matrix was assembled with its first
+    # row's blocks in the wrong widths (1, nBK, nnotBK, 1 instead of
+    # 1, 1, nBK, nnotBK), so the 1s sat over the wrong columns of D whenever
+    # nBK ≠ nnotBK and a TU matrix could yield a non-TU summand. Here the
+    # non-degenerate 3-sum partition has nBK = 1, nnotBK = 3.
+    @testset "3-sum with unequal B-column split" begin
+        M8 = [ 1  0 -1 -1  0  0 -1  0
+               1 -1  0  0  0  0 -1  0
+               0 -1  0  1  0  0  0  0
+              -1  1  1  0  0  0  1  0
+               0  0  1  1  0 -1  1  0
+               0  0  0  0 -1  0  1 -1
+               0  0 -1 -1  0  0 -1  1
+               0  0  0  0 -1  1  0 -1]
+        @test naive_is_totally_unimodular(M8)
+        @test is_totally_unimodular(M8)
+        @test is_totally_unimodular(Matrix{Int}(M8'))
+        # The 12×11 fuzz input that reduces to M8 via a 2-sum.
+        M12 = [ 0  0  0 -1  0  0  0  0  0 -1  0
+                0 -1  1  0  0  0  0  1  1  0  0
+                0  0  0  1  0  0 -1  0  0  1  0
+                0  0  0  0 -1 -1 -1  1  1  1  0
+               -1  0  1  0  0  0  0  0  0  0 -1
+                0  0  0  0  0 -1 -1  0  1  1  0
+                0  0  1  0 -1  0  0  1  1  0  0
+                0  0  0  0  1  1  1  0 -1 -1  0
+                0  0  0  0  0  1  1  0  0  0  0
+                0  0  0  1  0  1  0  0  0  0  0
+                0  0 -1  0  0  0  0 -1 -1  0  1
+               -1  1  0  0  0  0  0  0  0  0 -1]
+        @test TotalUnimodularity._tu_partition(M12)
+        @test is_totally_unimodular(M12)
+    end
+
     # An exception inside is_totally_unimodular fails these tests: it is a
     # predicate and must return an answer for every {-1,0,1} matrix.
     @testset "is_totally_unimodular vs naive (random, extended)" begin

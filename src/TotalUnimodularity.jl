@@ -1657,7 +1657,9 @@ function _apply_decomposition(M::Matrix{Int},
         mat1 = [A1                  A2             zeros(Int,nnotR,1)  zeros(Int,nnotR,1)
                 A3                  A4             ones(Int,nR,1)      ones(Int,nR,1)
                 zeros(Int,1,nnotK)  ones(Int,1,nK) 0                   ε₂               ]
-        mat2 = [ε₁                   zeros(Int,1,nBK)      ones(Int,1,nnotBK)    0
+        # First row of mat2: 1 over the B_cols block (D1/D3), 0 over the rest —
+        # block widths must match the rows below (1, 1, nBK, nnotBK).
+        mat2 = [ε₁                   0                     ones(Int,1,nBK)       zeros(Int,1,nnotBK)
                 ones(Int,nCR,1)      ones(Int,nCR,1)       D1                    D2
                 zeros(Int,nnotCR,1)  zeros(Int,nnotCR,1)   D3                    D4   ]
         return _is_tu_recursive(mat1, depth+1, seen) &&
