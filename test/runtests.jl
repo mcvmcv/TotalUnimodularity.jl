@@ -44,6 +44,17 @@ include("test_cmr.jl")
         @test !is_totally_unimodular([Int128(2)^70 0; 0 1])  # out-of-range entry
     end
 
+    @testset "argument validation" begin
+        # Unknown algorithm is an error regardless of the entries.
+        @test_throws ArgumentError cmr_is_totally_unimodular([1 0; 0 1]; algorithm=:bogus)
+        @test_throws ArgumentError cmr_is_totally_unimodular([2 0; 0 1]; algorithm=:bogus)
+        @test_throws ArgumentError cmr_is_totally_unimodular(Int8[2 0; 0 1]; algorithm=:bogus)
+        @test !cmr_is_totally_unimodular(Int8[2 0; 0 1]; algorithm=:partition)
+        # 3-sum summands too small to contain Am / Bm.
+        @test_throws ErrorException three_sum([1 1; 0 1], [1 0 1; 1 1 0])
+        @test_throws ErrorException three_sum([1 1 1; 1 0 1], [1 0; 1 1])
+    end
+
     # Regression: `seen` used to be a global visited-set, so identical blocks
     # in sibling branches (e.g. a 1-sum of a matrix with itself) were treated
     # as cycles and wrongly reported non-TU. Cycle detection is now path-based.
@@ -113,102 +124,122 @@ include("test_cmr.jl")
         end
     end
 
+    # An exception inside is_totally_unimodular fails these tests: it is a
+    # predicate and must return an answer for every {-1,0,1} matrix.
     @testset "is_totally_unimodular vs naive (random, extended)" begin
-        @info "Starting extended random tests..."
-        flush(stderr)
         rng = MersenneTwister(123)
-        n_tests = 0
-        n_agree = 0
-        n_skip = 0
-        n_total = 2000
-        report_every = 50
-
-        @info "Starting random TU tests..."
-
-        for trial in 1:n_total
-            rows = rand(rng, 2:5)
-            cols = rand(rng, 2:6)
-            M = rand(rng, (-1, 0, 1), rows, cols)
-
+        n_bad = 0
+        for trial in 1:2000
+            M = rand(rng, (-1, 0, 1), rand(rng, 2:5), rand(rng, 2:6))
             naive = naive_is_totally_unimodular(M)
-
-            fast = try
-                is_totally_unimodular(M)
-            catch e
-                n_skip += 1
-                @warn "Skipped matrix" trial=trial rows=rows cols=cols exception=sprint(showerror, e)
-                display(M)
-                flush(stderr)
-                continue
-            end
-            n_tests += 1
-            if naive == fast
-                n_agree += 1
-            else
+            fast = is_totally_unimodular(M)
+            if naive != fast
+                n_bad += 1
                 @warn "DISAGREEMENT" trial M naive fast
-                @test naive == fast
-            end
-
-            if trial % report_every == 0
-                @info "Progress" trial n_total n_agree n_tests n_skip
             end
         end
-
-        @info "Final" n_agree n_tests n_skip n_total
-        @test n_agree == n_tests
-        @test n_tests > 800
+        @test n_bad == 0
     end
 
-    @testset "is_totally_unimodular vs naive (larger random)" begin
+    # Oracle is the exact Ghouila-Houri test (itself checked against the
+    # naive oracle in internals.jl); naive is too slow at these sizes.
+    @testset "is_totally_unimodular vs partition (larger random)" begin
         rng = MersenneTwister(456)
-        n_tests = 0
-        n_agree = 0
-        n_skip = 0
-        n_total = 200
-
-        @info "Starting larger matrix tests..."
-
-        for trial in 1:n_total
-            rows = rand(rng, 5:8)
-            cols = rand(rng, 5:10)
-            M = rand(rng, (-1, 0, 1), rows, cols)
-
-            # Skip if naive is too slow (matrix is large and dense)
-            if rows * cols > 60
-                n_skip += 1
-                continue
-            end
-
-            naive = naive_is_totally_unimodular(M)
-
-            fast = try
-                is_totally_unimodular(M)
-            catch e
-                n_skip += 1
-                @warn "Skipped" trial rows cols exception=sprint(showerror, e)
-                display(M)
-                continue
-            end
-
-            n_tests += 1
-            if naive == fast
-                n_agree += 1
-            else
-                @warn "DISAGREEMENT" trial M naive fast
-                @test naive == fast
-            end
-
-            if trial % 20 == 0
-                @info "Progress" trial n_total n_agree n_tests n_skip
+        n_bad = 0
+        for trial in 1:200
+            M = rand(rng, (-1, 0, 1), rand(rng, 5:8), rand(rng, 5:10))
+            want = TotalUnimodularity._tu_partition(M)
+            fast = is_totally_unimodular(M)
+            if want != fast
+                n_bad += 1
+                @warn "DISAGREEMENT" trial M want fast
             end
         end
-
-        @info "Final" n_agree n_tests n_skip n_total
-        @test n_agree == n_tests
-        @test n_tests > 50
+        @test n_bad == 0
     end
 
-    
-end
+    # Uniform random matrices almost never reach the decomposition cases
+    # (they die at the Eulerian pre-filter or succeed as network matrices).
+    # Compose structured inputs instead: 1-/2-sums of F_1, F_2, K33, K33ᵀ and
+    # random network matrices, with random permutations, ±1 scalings and
+    # pivots (all TU-preserving), then optionally flip one entry so that
+    # roughly a third of the inputs are non-TU. Density-biased draws cover
+    # the Ghouila-Houri-style searches.
+    @testset "is_totally_unimodular vs partition (structured fuzz)" begin
+        # Seed chosen so the stream includes inputs that hit the pivot-cycle
+        # false negative fixed alongside "pivot cycles on TU matrices" (3 of
+        # 2000 on the pre-fix code; some seeds hit none).
+        rng = MersenneTwister(2)
 
-    
+        function rand_network(k, n)
+            # Random tree on vertices 1..k+1 (tree arc v-1 joins parent[v], v);
+            # column j is the signed tree path between two random vertices.
+            parent = [0; [rand(rng, 1:v-1) for v in 2:k+1]]
+            orient = rand(rng, (-1, 1), k)
+            M = zeros(Int, k, n)
+            for j in 1:n, (v, s) in ((rand(rng, 1:k+1), 1), (rand(rng, 1:k+1), -1))
+                while v != 1
+                    M[v-1, j] += s * orient[v-1]
+                    v = parent[v]
+                end
+            end
+            M
+        end
+        function scramble(M)
+            M = M[randperm(rng, size(M, 1)), randperm(rng, size(M, 2))]
+            M .* rand(rng, (-1, 1), size(M, 1)) .* rand(rng, (-1, 1), 1, size(M, 2))
+        end
+        function rand_pivot(M)
+            p = rand(rng, findall(!iszero, M))
+            pivot(M[[p[1]; setdiff(1:size(M, 1), p[1])],
+                    [p[2]; setdiff(1:size(M, 2), p[2])]], 1)
+        end
+        function block()
+            c = rand(rng, 1:6)
+            scramble(c == 1 ? F_1 : c == 2 ? F_2 : c == 3 ? K33 :
+                     c == 4 ? Matrix{Int}(K33') :
+                     rand_network(rand(rng, 2:5), rand(rng, 2:6)))
+        end
+        function composed()
+            M = block()
+            for _ in 1:rand(rng, 0:2)
+                B = block()
+                size(M, 1) + size(B, 1) > 13 && break
+                M = scramble(rand(rng) < 0.8 ? two_sum(M, B) : one_sum(M, B))
+                for _ in 1:rand(rng, 0:3)
+                    iszero(M) || (M = rand_pivot(M))
+                end
+            end
+            r, c = min(size(M, 1), 12), min(size(M, 2), 12)
+            M = M[randperm(rng, size(M, 1))[1:r], randperm(rng, size(M, 2))[1:c]]
+            if rand(rng) < 0.35
+                i, j = rand(rng, 1:r), rand(rng, 1:c)
+                M[i, j] = rand(rng, setdiff(-1:1, M[i, j]))
+            end
+            M
+        end
+        function biased()
+            p = 0.2 + 0.7rand(rng)
+            [rand(rng) < p ? rand(rng, (-1, 1)) : 0
+             for _ in 1:rand(rng, 6:10), _ in 1:rand(rng, 6:10)]
+        end
+
+        n_bad = 0
+        n_tu = 0
+        n_total = 2000
+        for trial in 1:n_total
+            M = rand(rng) < 0.85 ? composed() : biased()
+            want = TotalUnimodularity._tu_partition(M)
+            fast = is_totally_unimodular(M)
+            n_tu += want
+            if want != fast
+                n_bad += 1
+                @warn "DISAGREEMENT" trial M want fast
+            end
+        end
+        @test n_bad == 0
+        # The generator must keep producing both answers in bulk.
+        @test n_total ÷ 4 < n_tu < 3 * n_total ÷ 4
+    end
+
+end

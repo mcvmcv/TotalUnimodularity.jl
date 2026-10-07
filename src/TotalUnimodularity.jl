@@ -848,8 +848,9 @@ early exit (most splits fail on rank(B) alone) and is both simpler and more
 correct than the matroid-intersection approach.
 
 For larger matrices: falls back to the matroid-intersection algorithm
-(Theorem 20.2), which may miss some decompositions but is conservative
-(only gives false negatives, never false positives).
+(Theorem 20.2), which may miss some decompositions. `_is_tu_irreducible`
+only reaches it when both dimensions exceed 24 (smaller matrices beyond
+12×12 go to `_tu_partition`), where it is impractically slow anyway.
 
 Returns `(true, (A, B, C, D))` if such a decomposition exists,
 or `(false, (M, M, M, M))` if not.
@@ -1412,6 +1413,11 @@ function three_sum(A::Matrix{Int}, B::Matrix{Int})
     _check_size(A)
     _check_size(B)
     @views begin
+        # Am and Bm need at least one row and one column each.
+        (size(A, 1) < 2 || size(A, 2) < 3) &&
+            error("Matrix A does not have the required form for a 3-sum.")
+        (size(B, 1) < 2 || size(B, 2) < 3) &&
+            error("Matrix B does not have the required form for a 3-sum.")
         (A[1:end-1, end-1] != A[1:end-1, end] ||
          A[end, end-1] != 0 || A[end, end] != 1) &&
             error("Matrix A does not have the required form for a 3-sum.")
@@ -1510,7 +1516,9 @@ for f in (:is_totally_unimodular, :naive_is_totally_unimodular)
 end
 function cmr_is_totally_unimodular(M::AbstractMatrix{<:Integer}; kwargs...)::Bool
     N = _to_int_matrix(M)
-    N === nothing ? false : cmr_is_totally_unimodular(N; kwargs...)
+    # Out-of-range entries: still go through the Matrix{Int} method so the
+    # keyword arguments are validated; any out-of-range stand-in gives false.
+    cmr_is_totally_unimodular(N === nothing ? fill(2, 1, 1) : N; kwargs...)
 end
 
 function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::Bool
@@ -1709,9 +1717,10 @@ end
 # ──────────────────────────────────────────────────────────────────────────────
 # Partition algorithm (Ghouila-Houri criterion)
 # Originally a port of tuPartition / tuPartitionSubset / tuPartitionSearch from
-# cmr/tu.c; the subset and sign enumerations are now interleaved into a single
-# branch-and-prune search (see comments in _tu_partition), which is orders of
-# magnitude faster than the plain 3^r enumeration on typical inputs.
+# cmr/tu.c. The subset enumeration and the per-subset sign search remain
+# separate phases (see comments in _tu_partition for why they must); the sign
+# search is branch-and-prune, which is orders of magnitude faster than the
+# plain 3^r enumeration on typical inputs.
 # ──────────────────────────────────────────────────────────────────────────────
 
 function _tu_partition(M::Matrix{Int})::Bool
@@ -1933,16 +1942,16 @@ inputs; CMR uses them as cross-checks and for small matrices.
 """
 function cmr_is_totally_unimodular(M::Matrix{Int};
                                    algorithm::Symbol = :decomposition)::Bool
+    algorithm in (:decomposition, :eulerian, :partition) ||
+        throw(ArgumentError("Unknown algorithm $(repr(algorithm)). " *
+                            "Use :decomposition, :eulerian, or :partition."))
     all(m -> m in (-1, 0, 1), M) || return false
     if algorithm === :decomposition
         return is_totally_unimodular(M)
     elseif algorithm === :eulerian
         return _tu_eulerian(M)
-    elseif algorithm === :partition
-        return _tu_partition(M)
     else
-        throw(ArgumentError("Unknown algorithm $(repr(algorithm)). " *
-                            "Use :decomposition, :eulerian, or :partition."))
+        return _tu_partition(M)
     end
 end
 

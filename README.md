@@ -1,8 +1,14 @@
 # TotalUnimodularity.jl
 
-A pure Julia implementation of the polynomial-time algorithm for testing
-[total unimodularity](https://en.wikipedia.org/wiki/Unimodular_matrix#Total_unimodularity)
-of integer matrices, based on Seymour's decomposition theorem.
+A pure Julia implementation of total unimodularity testing for integer
+matrices, following the recognition algorithm based on Seymour's
+decomposition theorem.
+See [total unimodularity](https://en.wikipedia.org/wiki/Unimodular_matrix#Total_unimodularity).
+
+> **Note:** the algorithm of Schrijver's Theorem 20.3 is polynomial-time, but
+> this implementation is not: its separation search is exhaustive, and
+> mid-sized matrices are decided by an exact exponential-time test. See
+> [Performance](#performance) for the practical limits.
 
 ## What is Total Unimodularity?
 
@@ -96,9 +102,16 @@ decisions and known issues.
 
 ## Performance
 
-`is_totally_unimodular` works well for matrices up to approximately 8×10.
-The Seymour decomposition step (Theorem 20.2) has O((m+n)^8) worst-case
-complexity and becomes slow for larger matrices.
+`is_totally_unimodular` is practical when the smaller dimension of the
+(reduced) matrix is at most about 22, and takes one of three routes by size:
+
+- **Up to 12×12:** Seymour decomposition, with the separation found by
+  enumerating all row/column bipartitions (exponential, with heavy pruning;
+  worst case a few seconds at 12×12).
+- **Beyond 12×12, smaller dimension ≤ 24:** an exact branch-and-prune
+  Ghouila-Houri partition test.
+- **Both dimensions > 24:** the matroid-intersection separation search of
+  Theorem 20.2, O((m+n)^8) and impractically slow at these sizes.
 
 For matrices beyond the 12×12 decomposition-search threshold whose smaller
 dimension is at most 24, the implementation switches to an exact
@@ -155,8 +168,10 @@ available but has exponential time complexity.
 ```
 
 The test suite verifies `is_totally_unimodular` against
-`naive_is_totally_unimodular` on 2000 random matrices of size up to 5×6,
-with no disagreements.
+`naive_is_totally_unimodular` on 2000 random matrices of size up to 5×6, and
+against the exact Ghouila-Houri test on larger random matrices and on 2000
+structured inputs (sums of F_1, F_2, K₃,₃ and network matrices with random
+pivots and scalings) that exercise the decomposition cases.
 
 ## Background
 
