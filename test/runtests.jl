@@ -77,6 +77,42 @@ include("test_cmr.jl")
         end
     end
 
+    # Regression: a pivot cycle (degenerate 3-sum retry ↔ rank-2 pivot
+    # returning to an ancestor matrix) used to be reported as non-TU. These
+    # TU matrices (2-sums of F_1/F_2/K33/network blocks with random pivots)
+    # were found by structured fuzzing against the Ghouila-Houri test.
+    @testset "pivot cycles on TU matrices" begin
+        cyc1 = [-1 -1  0  0 -1  0  1  1
+                 0 -1  1  0  0  1  0  0
+                 0  0  1  0  0  1 -1  0
+                 0  0  0  1 -1  0  0  1
+                 1  0  0  0  1  1 -1 -1
+                -1  0  0 -1  0  0  1  0
+                -1  0  0  0 -1  0  0  0
+                 0  0  0  1  0  0  0  1]
+        cyc2 = [-1 -1  0  0  1 -1 -1  0
+                 0 -1  1  0  1 -1 -1  0
+                 0  0  1  0  1  0 -1  0
+                 0  0  0  1  1  0  0  1
+                 0  1  0 -1 -1  1  0 -1
+                 0  1  0 -1 -1  0  0  0
+                -1 -1  0  0  1 -1  0  0
+                -1  0 -1  0  0  0  0  0]
+        cyc3 = [-1 -1  0  0  0  0  0 -1
+                -1  0  0  0  0 -1  0 -1
+                 0  1  0  0  0 -1  0  0
+                 0 -1 -1  0  1  0  0 -1
+                -1  0  0  0  0 -1  0  0
+                 0  0  0  1 -1  0 -1  0
+                 0 -1 -1  1  0  0  0 -1
+                 0  1  1 -1  0  0  1  0]
+        for M in (cyc1, cyc2, cyc3)
+            @test naive_is_totally_unimodular(M)
+            @test is_totally_unimodular(M)
+            @test is_totally_unimodular(Matrix{Int}(M'))
+        end
+    end
+
     @testset "is_totally_unimodular vs naive (random, extended)" begin
         @info "Starting extended random tests..."
         flush(stderr)

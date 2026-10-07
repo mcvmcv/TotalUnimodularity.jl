@@ -1530,10 +1530,12 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}})::B
 
     # Cycle detection: `seen` holds the matrices on the *current* recursion
     # path only. Membership means the pivot cases (5/6) have cycled back to an
-    # ancestor, so this branch cannot make progress. Each matrix is removed
-    # once its subtree is done — identical matrices in sibling branches (e.g.
-    # duplicate blocks of a 1-sum) are legitimate and must not be rejected.
-    M in seen && return false
+    # ancestor, so this branch cannot make progress. That says nothing about
+    # whether M is TU (TU matrices do cycle, e.g. degenerate 3-sum retry ↔
+    # rank-2 pivot), so decide M exactly with the Ghouila-Houri test instead.
+    # Each matrix is removed once its subtree is done — identical matrices in
+    # sibling branches (e.g. duplicate blocks of a 1-sum) are legitimate.
+    M in seen && return _tu_partition(M)
     push!(seen, M)
     result = _is_tu_irreducible(M, depth, seen)
     delete!(seen, M)
