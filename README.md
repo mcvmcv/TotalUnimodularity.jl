@@ -169,6 +169,66 @@ For tiny matrices the naive checker wins on constant factors;
 `is_totally_unimodular` pulls ahead from ~6×6 and remains usable far beyond
 the naive checker's exponential wall.
 
+### Benchmark: CMR vs `is_totally_unimodular`
+
+[CMR](https://github.com/discopt/cmr) is a C library with a polynomial-time
+implementation of the full Seymour decomposition. The table compares its
+`cmr-tu` tool (Release build, default decomposition algorithm) with
+`is_totally_unimodular` on the same machine. CMR times are its own reported
+recognition time, excluding process start and file reading; Julia times are
+after JIT warmup. Both gave the same answer on every matrix where both
+finished.
+
+| Matrix | Size | TU | CMR | `is_totally_unimodular` |
+|---|---|---|---|---|
+| K₃₃ | 5×4 | true | 0.39 ms | 0.018 ms |
+| F₁ | 5×5 | true | 0.47 ms | 0.015 ms |
+| R10 | 5×5 | true | 0.32 ms | 0.50 ms |
+| R12 | 6×6 | true | 1.02 ms | 0.096 ms |
+| Fano | 3×4 | false | 0.35 ms | 0.012 ms |
+| CMR Eulerian test | 12×12 | false | 2.8 ms | 2.5 ms |
+| CMR partition test | 14×14 | false | 3.9 ms | 13.4 ms |
+| 2-sum chain, 6 blocks | 22×22 | true | 1.5 ms | 0.98 ms |
+| 2-sum chain, 13 blocks | 47×46 | true | 3.2 ms | 5.1 ms |
+| 2-sum chain, 41 blocks | 145×144 | true | 12.5 ms | 138 ms |
+| 2-sum chain, 201 blocks | 705×704 | true | 0.21 s | 58.8 s |
+| 2-sum chain (201 blocks) + non-TU block | 708×706 | false | 0.22 s | 58.9 s |
+| random network | 20×40 | true | 0.58 ms | 0.35 ms |
+| random network | 50×100 | true | 0.95 ms | 3.2 ms |
+| random network | 100×200 | true | 1.5 ms | 25.8 ms |
+| random network | 200×400 | true | 3.0 ms | 133 ms |
+| network, one entry flipped | 50×100 | false | 147 ms | 24.3 ms |
+| random sparse, density 0.1 | 30×30 | false | 1.9 ms | 1.1 ms |
+| random sparse, density 0.05 | 100×100 | false | 10.0 ms | 101 ms |
+| random sparse, density 0.5 | 20×20 | false | 0.43 ms | 1.9 ms |
+
+The next family has no 2-separation and is neither a network matrix nor the
+transpose of one: the 3-sum of the network matrix of Kₙ with the transpose
+of the network matrix of Kₘ plus one vertex of degree 3 (written Kₘ* below),
+with rows and columns permuted and rescaled. This is where
+`is_totally_unimodular` falls back to its exponential test.
+
+| Matrix | Size | TU | CMR | `is_totally_unimodular` |
+|---|---|---|---|---|
+| K₅ ⊕₃ K₅* | 10×8 | true | 1.3 ms | 0.23 ms |
+| K₆ ⊕₃ K₅* | 11×12 | true | 1.5 ms | 1.7 ms |
+| K₆ ⊕₃ K₆* | 15×13 | true | 1.9 ms | 7.4 ms |
+| K₇ ⊕₃ K₆* | 16×18 | true | 1.3 ms | 66 ms |
+| K₇ ⊕₃ K₇* | 21×19 | true | 1.1 ms | 0.64 s |
+| K₈ ⊕₃ K₇* | 22×25 | true | 2.9 ms | 8.3 s |
+| K₈ ⊕₃ K₈* | 28×26 | true | 1.4 ms | > 3 min (stopped) |
+| K₉ ⊕₃ K₉* | 36×34 | true | 7.1 ms | > 3 min (stopped) |
+| K₁₂ ⊕₃ K₁₂* | 66×64 | true | 40.5 ms | > 3 min (stopped) |
+| the nine above, one entry flipped | 10×8 – 66×64 | false | 0.4 – 39 ms | 0.09 – 20 ms |
+
+In short: on small matrices this package wins on constant factors; on large
+matrices that split into small pieces or are network matrices it finishes
+but CMR scales much better (the 2-separation search restarts from scratch
+after every split); and on large TU blocks with no 2-separation it is
+unusable beyond a smaller dimension of about 22, while CMR stays in
+milliseconds. Non-TU inputs are usually cheap for both. If you need large
+general instances, use CMR.
+
 Rank computations avoid floating-point SVD entirely: the hot paths use
 Float64 Gaussian elimination (exact for the small {-1,0,1} matrices arising
 here) with rank caching, and exact Bareiss integer elimination elsewhere.
