@@ -216,6 +216,11 @@ digraph is not strongly connected. Trying every nonzero entry as (i0, j0)
 finds a 2-separation whenever there is one; the case rank(C) = 1, B = 0 is
 the same statement with the two sides renamed.
 
+It is enough to try the edges of a spanning tree of the support graph of M
+(rows and columns as vertices, nonzero entries as edges): the tree connects
+the two sides of the separation, so one of its edges crosses, and since
+C = 0 that edge is a nonzero of B.
+
 ## Seymour Decomposition Test (Theorem 20.2)
 
 Find Y ⊆ columns of [I | M] such that:

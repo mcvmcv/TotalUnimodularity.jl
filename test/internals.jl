@@ -120,6 +120,10 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         @test _drop_dependent_rows(M) == [1 0 1; 0 1 0]
         @test _drop_dependent_rows(F_1) == F_1
         @test _drop_dependent_rows(F_2) == F_2
+        # the first row of each class is the one kept, zero rows included
+        M = [0 0; 1 -1; 0 0; -1 1; 1 1; 1 -1]
+        @test _drop_dependent_rows(M) == [0 0; 1 -1; 1 1]
+        @test _drop_dependent_cols(Matrix{Int}(M')) == [0 0; 1 -1; 1 1]'
     end
 
     @testset "_drop_dependent_cols" begin
@@ -489,6 +493,16 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         @test _find_two_separation(F_2) === nothing
         @test _find_two_separation(two_sum(F_1, F_2)) !== nothing
         @test _find_two_separation(zeros(Int, 1, 1)) === nothing
+        @test _find_two_separation(zeros(Int, 2, 3)) === nothing
+
+        # A long chain can be cut near the middle; the split should not just
+        # peel one block off the end.
+        long = F_1
+        for i in 1:30
+            long = two_sum(long, isodd(i) ? F_2 : F_1)
+        end
+        R1, C1 = _find_two_separation(long)
+        @test sum(size(long)) ÷ 4 <= length(R1) + length(C1) <= 3 * sum(size(long)) ÷ 4
     end
 
     @testset "_find_epsilon" begin

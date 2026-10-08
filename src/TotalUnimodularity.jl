@@ -190,34 +190,35 @@ _is_degenerate(M::Matrix{Int}) =
     any(j -> count(!iszero, @view M[:,j]) <= 1, 1:size(M,2)) ||
     _has_dependent_vectors(M)
 
-# Remove one row from each dependent pair of rows.
-function _drop_dependent_rows(M::Matrix{Int})
-    r = size(M, 1)
-    keep = trues(r)
-    for i in 1:r-1
-        keep[i] || continue
-        for j in i+1:r
-            if @views M[i,:] == M[j,:] || M[i,:] == -M[j,:]
-                keep[j] = false
-            end
-        end
+# Mark the first vector of each class of equal-or-opposite vectors of M along
+# `dim` (1: rows, 2: columns). Each vector is keyed by itself or its negative,
+# whichever has a positive first nonzero, so a class shares one key and the
+# cost is linear in the size of M rather than quadratic in the vector count.
+function _independent_mask(M::Matrix{Int}, dim::Int)::BitVector
+    n = size(M, dim)
+    keep = trues(n)
+    n < 2 && return keep
+    seen = Set{Vector{Int}}()
+    sizehint!(seen, n)
+    for i in 1:n
+        v = dim == 1 ? M[i, :] : M[:, i]
+        k = findfirst(!iszero, v)
+        k !== nothing && v[k] < 0 && (v .= .-v)
+        v in seen ? (keep[i] = false) : push!(seen, v)
     end
-    return M[keep, :]
+    keep
 end
 
-# Remove one column from each dependent pair of columns.
+# Remove all but the first row of each class of equal-or-opposite rows.
+function _drop_dependent_rows(M::Matrix{Int})
+    keep = _independent_mask(M, 1)
+    all(keep) ? M : M[keep, :]
+end
+
+# Remove all but the first column of each class of equal-or-opposite columns.
 function _drop_dependent_cols(M::Matrix{Int})
-    c = size(M, 2)
-    keep = trues(c)
-    for i in 1:c-1
-        keep[i] || continue
-        for j in i+1:c
-            if @views M[:,i] == M[:,j] || M[:,i] == -M[:,j]
-                keep[j] = false
-            end
-        end
-    end
-    return M[:, keep]
+    keep = _independent_mask(M, 2)
+    all(keep) ? M : M[:, keep]
 end
 
 # Remove dependent rows and columns.
@@ -1188,58 +1189,113 @@ function _reachable_bitmask(edges::Vector{Tuple{Int,Int}}, n_edges::Int,
     visited & ~W_mask & ~ST_mask
 end
 
-# Search of the rule digraph of _find_two_separation for pivot (i0, j0), from
-# node `start` (rows as i, columns as m + j), marking inR/inC; returns the
-# number of nodes reached. Forward follows the two rules; backward follows
-# them in reverse, which swaps which rule applies to rows and to columns.
-# Row i0 and column j0 are not nodes.
-function _two_separation_reach!(inR::BitVector, inC::BitVector, queue::Vector{Int},
-                                M::Matrix{Int}, i0::Int, j0::Int,
-                                start::Int, forward::Bool)::Int
+# Strongly connected components of the rule digraph of _find_two_separation
+# for pivot (i0, j0) (Tarjan's algorithm, iterative). Nodes are the rows i ≠ i0
+# (as i) and the columns j ≠ j0 (as m + j). `order` receives the nodes
+# component by component, successors first, and `ends` the position in `order`
+# at which each component ends — so every prefix of `order` that stops at a
+# component boundary is closed under the rules.
+function _two_separation_sccs!(order::Vector{Int}, ends::Vector{Int},
+                               index::Vector{Int}, low::Vector{Int}, pos::Vector{Int},
+                               onstack::BitVector, stack::Vector{Int}, calls::Vector{Int},
+                               M::Matrix{Int}, i0::Int, j0::Int)
     m, n = size(M)
     p = M[i0, j0]
-    fill!(inR, false)
-    fill!(inC, false)
-    start <= m ? (inR[start] = true) : (inC[start - m] = true)
-    queue[1] = start
-    head = 0; tail = 1
-    @inbounds while head < tail
-        v = queue[head += 1]
-        if (v <= m) == forward
-            # minor rule: row → columns (forward), column → rows (backward)
+    fill!(index, 0)
+    empty!(order); empty!(ends); empty!(stack); empty!(calls)
+    counter = 0
+    @inbounds for root in 1:m+n
+        (root == i0 || root == m + j0 || index[root] != 0) && continue
+        index[root] = low[root] = (counter += 1)
+        pos[root] = 0
+        push!(stack, root); onstack[root] = true
+        push!(calls, root)
+        while !isempty(calls)
+            v = calls[end]
+            descended = false
             if v <= m
+                # minor rule: row v pulls in column w
                 q = M[v, j0]
-                for c in 1:n
-                    (inC[c] || c == j0) && continue
-                    p * M[v, c] == M[i0, c] * q && continue
-                    inC[c] = true; queue[tail += 1] = m + c
+                while pos[v] < n
+                    w = (pos[v] += 1)
+                    (w == j0 || p * M[v, w] == M[i0, w] * q) && continue
+                    u = m + w
+                    if index[u] == 0
+                        index[u] = low[u] = (counter += 1)
+                        pos[u] = 0
+                        push!(stack, u); onstack[u] = true
+                        push!(calls, u)
+                        descended = true
+                        break
+                    elseif onstack[u]
+                        low[v] = min(low[v], index[u])
+                    end
                 end
             else
+                # support rule: column v - m pulls in row w
                 c = v - m
-                q = M[i0, c]
-                for r in 1:m
-                    (inR[r] || r == i0) && continue
-                    p * M[r, c] == q * M[r, j0] && continue
-                    inR[r] = true; queue[tail += 1] = r
+                while pos[v] < m
+                    w = (pos[v] += 1)
+                    (w == i0 || iszero(M[w, c])) && continue
+                    if index[w] == 0
+                        index[w] = low[w] = (counter += 1)
+                        pos[w] = 0
+                        push!(stack, w); onstack[w] = true
+                        push!(calls, w)
+                        descended = true
+                        break
+                    elseif onstack[w]
+                        low[v] = min(low[v], index[w])
+                    end
                 end
             end
+            descended && continue
+            pop!(calls)
+            if low[v] == index[v]
+                while true
+                    u = pop!(stack)
+                    onstack[u] = false
+                    push!(order, u)
+                    u == v && break
+                end
+                push!(ends, length(order))
+            end
+            isempty(calls) || (low[calls[end]] = min(low[calls[end]], low[v]))
+        end
+    end
+    nothing
+end
+
+# Candidate pivots for _find_two_separation: the edges of a spanning tree of
+# the support graph of M (rows and columns as vertices, nonzeros as edges).
+# For a connected M, the two sides of any 2-separation are joined by a tree
+# edge, and that edge is a nonzero of the rank-1 block because the other
+# cross block is zero. If M is not connected, every nonzero is returned.
+function _two_separation_pivots(M::Matrix{Int})::Vector{Tuple{Int,Int}}
+    m, n = size(M)
+    pivots = Tuple{Int,Int}[]
+    seenR = falses(m)
+    seenC = falses(n)
+    queue = [1]                          # rows as i, columns as m + j
+    seenR[1] = true
+    head = 0
+    @inbounds while head < length(queue)
+        v = queue[head += 1]
+        if v <= m
+            for c in 1:n
+                (seenC[c] || iszero(M[v, c])) && continue
+                seenC[c] = true; push!(queue, m + c); push!(pivots, (v, c))
+            end
         else
-            # support rule: column → rows (forward), row → columns (backward)
-            if v <= m
-                for c in 1:n
-                    (inC[c] || c == j0 || iszero(M[v, c])) && continue
-                    inC[c] = true; queue[tail += 1] = m + c
-                end
-            else
-                c = v - m
-                for r in 1:m
-                    (inR[r] || r == i0 || iszero(M[r, c])) && continue
-                    inR[r] = true; queue[tail += 1] = r
-                end
+            c = v - m
+            for r in 1:m
+                (seenR[r] || iszero(M[r, c])) && continue
+                seenR[r] = true; push!(queue, r); push!(pivots, (r, c))
             end
         end
     end
-    tail
+    length(queue) == m + n && return pivots
+    [(i, j) for j in 1:n for i in 1:m if !iszero(M[i, j])]
 end
 
 """
@@ -1255,9 +1311,9 @@ Returns `(R1, C1)` as sorted index vectors, or `nothing` if `M` has no
 connected matrix has exactly one nonzero cross block, so naming the sides so
 that it is `M[R1, C2]` loses no generality.
 
-Polynomial, O(nnz · m · n). Fix a nonzero entry (i0, j0) of the rank-1 block:
-row i0 is on side 1, column j0 on side 2. Membership of side 1 is then closed
-under two single-premise rules:
+Polynomial, O((m + n) · m · n) for a connected matrix. Fix a nonzero entry
+(i0, j0) of the rank-1 block: row i0 is on side 1, column j0 on side 2.
+Membership of side 1 is then closed under two single-premise rules:
 
   * a column on side 1 pulls in every row where it is nonzero (keeps
     M[R2, C1] = 0);
@@ -1267,35 +1323,65 @@ under two single-premise rules:
 
 So the rules form a digraph on the other m+n-2 rows and columns, and the
 valid choices of side 1 are exactly {i0} ∪ S for S a nonempty proper subset
-closed under its edges. Such an S exists iff the digraph is not strongly
-connected, which three searches decide: forward from any node v, backward to
-v, and — if something cannot reach v — forward from that node.
+closed under its edges. Such an S exists iff the digraph has more than one
+strongly connected component. Only the edges of a spanning tree of the
+support graph need to be tried as (i0, j0), see `_two_separation_pivots`.
+
+Balanced splits are preferred, because they keep the recursion on the two
+pieces shallow, where always peeling off a small piece would re-examine the
+large remainder once per piece: for each pivot, the closed set chosen is the
+union of components, in the order Tarjan's algorithm emits them, that is
+nearest to half of the rows and columns, and a few pivots are compared
+before settling on one.
 """
 function _find_two_separation(M::Matrix{Int})::Union{Nothing, Tuple{Vector{Int}, Vector{Int}}}
     m, n = size(M)
     (m + n < 4 || m < 1 || n < 1) && return nothing
     n_nodes = m + n - 2
-    inR = falses(m)
-    inC = falses(n)
-    queue = Vector{Int}(undef, m + n)    # rows as i, columns as m + j
+    order = Int[]; ends = Int[]; stack = Int[]; calls = Int[]
+    sizehint!(order, n_nodes)
+    index = Vector{Int}(undef, m + n)
+    low = Vector{Int}(undef, m + n)
+    pos = Vector{Int}(undef, m + n)
+    onstack = falses(m + n)
 
-    for j0 in 1:n, i0 in 1:m
-        iszero(M[i0, j0]) && continue
-        reach!(start, forward) =
-            _two_separation_reach!(inR, inC, queue, M, i0, j0, start, forward)
-
-        v = i0 == 1 ? (m >= 2 ? 2 : (j0 == 1 ? m + 2 : m + 1)) : 1   # any node
-        if reach!(v, true) == n_nodes
-            reach!(v, false) == n_nodes && continue     # strongly connected
-            u = 0                                        # a node that cannot reach v
-            for r in 1:m; (r == i0 || inR[r]) || (u = r; break); end
-            if u == 0
-                for c in 1:n; (c == j0 || inC[c]) || (u = m + c; break); end
-            end
-            reach!(u, true)
+    # Most balanced closed set for one pivot: (size, R1, C1), size 0 if none.
+    function split(i0, j0)
+        _two_separation_sccs!(order, ends, index, low, pos, onstack, stack, calls, M, i0, j0)
+        length(ends) == 1 && return (0, Int[], Int[])       # strongly connected
+        best = ends[1]
+        for e in @view ends[1:end-1]
+            abs(2e - n_nodes) < abs(2best - n_nodes) && (best = e)
         end
-        inR[i0] = true
-        return (findall(inR), findall(inC))
+        R1 = [i0]; C1 = Int[]
+        for v in @view order[1:best]
+            v <= m ? push!(R1, v) : push!(C1, v - m)
+        end
+        (min(best, n_nodes - best), sort!(R1), sort!(C1))
+    end
+
+    # How balanced the split can be depends on the pivot: one inside a small
+    # piece at the end of a long chain can only cut that piece off. So a few
+    # pivots spread over the spanning tree are tried first and the best split
+    # kept, stopping early at one with a quarter of the matrix on each side.
+    pivots = _two_separation_pivots(M)
+    L = length(pivots)
+    L == 0 && return nothing                    # zero matrix
+    tried = falses(L)
+    found = (0, Int[], Int[])
+    for f in (4, 2, 6, 1, 5, 3, 7)
+        k = clamp((f * L) ÷ 8, 1, L)
+        tried[k] && continue
+        tried[k] = true
+        cand = split(pivots[k]...)
+        cand[1] > found[1] && (found = cand)
+        4 * found[1] >= n_nodes && break
+    end
+    found[1] > 0 && return (found[2], found[3])
+    for k in 1:L
+        tried[k] && continue
+        cand = split(pivots[k]...)
+        cand[1] > 0 && return (cand[2], cand[3])
     end
     return nothing
 end

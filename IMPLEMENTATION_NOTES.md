@@ -210,13 +210,41 @@ M[R2, C1] = 0), and a row r on side 1 pulls in every column c whose 2×2
 minor on rows {i0, r}, columns {j0, c} is nonzero (keeps M[R1, C2] rank 1).
 The rules are the edges of a digraph on the other m+n-2 rows and columns,
 and a 2-separation with that pivot exists iff the digraph is not strongly
-connected: any nonempty proper closed set is a valid side 1. Three searches
-per pivot decide that (forward from a node, backward to it, forward from a
-node that cannot reach it), so the whole search is O(nnz · m · n).
+connected: any nonempty proper closed set is a valid side 1. One pass of
+Tarjan's algorithm per pivot (`_two_separation_sccs!`) finds the strongly
+connected components, successors first, so every prefix of that order ending
+at a component boundary is a closed set.
+
+Only the edges of a spanning tree of the support graph are tried as pivots
+(`_two_separation_pivots`): the two sides of a 2-separation of a connected
+matrix are joined by some tree edge, and that edge lies in the rank-1 block
+because the other cross block is zero. That is m+n-1 pivots instead of one
+per nonzero, O((m+n) · m · n) in total.
+
+Which split is returned matters as much as finding one. Peeling a small
+piece off a long 2-sum chain leaves a remainder nearly as large as before,
+and every level of the recursion pays for reduction, the network tests and
+another search on it: a chain of k blocks then costs k passes over the whole
+matrix. So for each pivot the prefix nearest to half of the rows and columns
+is taken, and since a pivot inside a piece at the end of a chain can only
+cut that piece off, up to seven pivots spread over the spanning tree are
+compared first (stopping at a split with a quarter of the matrix on each
+side). The 705×704 chain of 201 blocks went from 10 s to under 0.5 s with
+this.
 
 The function is specified for reduced, connected matrices, which is what
 `_is_tu_irreducible` passes it; the unit test checks it against brute-force
 enumeration of all splits under the same precondition.
+
+### Duplicate rows and columns are found by hashing
+`_reduce` drops all but the first of each class of equal-or-opposite rows
+(and columns). This was a pairwise comparison, O(m²n), with an allocation
+per pair for the negated row; `_reduce` runs at every level of the
+recursion, and on the 705×704 chain it accounted for 91% of a 59 s run.
+`_independent_mask` keys each vector by itself or its negative, whichever
+has a positive first nonzero, and uses a `Set`: linear in the size of the
+matrix (59 s → 10 s on that input, 133 ms → 42 ms on a 200×400 network
+matrix).
 
 ### Recursion depth counts pivots only
 `depth` used to be incremented on every recursive call, with a cutoff at

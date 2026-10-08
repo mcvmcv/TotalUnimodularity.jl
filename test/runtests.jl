@@ -194,7 +194,7 @@ include("test_cmr.jl")
         end
         bad = [1 1 1; 1 1 0; 1 0 1; 0 1 1]      # first row is the glue row
         @test !naive_is_totally_unimodular(bad[2:end, :])
-        for k in (5, 12, 40)
+        for k in (5, 12, 40, 200)
             M = chain(k)
             @test minimum(size(M)) > 20
             @test is_totally_unimodular(M)
