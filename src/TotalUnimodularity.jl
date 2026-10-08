@@ -2073,10 +2073,20 @@ function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, 
     return _apply_decomposition(M, A, B, C, D, rB, rC, depth, seen, fast)
 end
 
-# Dispatch on the rank case of a decomposition M = [A B; C D].
-# When rB==1 and rC==1 (3-sum / Case 4), if the first decomposition found by
-# _decompose gives a degenerate A or D, we retry with reject_degenerate_3sum=true
-# to find a non-degenerate partition instead of incorrectly returning false.
+# Continue Cases 5/6 after the pivot: P is the pivoted matrix and (R1, C1),
+# (R2, C2) the split carried over from before the pivot, which has
+# rank(B) = rank(C) = 1 there.
+function _apply_pivoted(P::Matrix{Int}, R1, C1, R2, C2,
+                        depth::Int, seen::Set{Matrix{Int}}, fast::Bool)::Bool
+    A, B, C, D = P[R1, C1], P[R1, C2], P[R2, C1], P[R2, C2]
+    rB, rC = _rank_int(B), _rank_int(C)
+    (rB == 1 && rC == 1) ||
+        error("split of the pivoted matrix has rank(B) = $rB, rank(C) = $rC, expected 1 and 1")
+    _apply_decomposition(P, A, B, C, D, 1, 1, depth + 1, seen, fast)
+end
+
+# Dispatch on the rank case of a decomposition M = [A B; C D] of a reduced,
+# connected matrix M.
 function _apply_decomposition(M::Matrix{Int},
                                A::Matrix{Int}, B::Matrix{Int},
                                C::Matrix{Int}, D::Matrix{Int},
@@ -2096,21 +2106,14 @@ function _apply_decomposition(M::Matrix{Int},
                _is_tu_recursive([f D], depth, seen, fast)
 
     elseif rB == 1 && rC == 1
-        # If the current partition is degenerate (A or D has trivial/dependent
-        # rows or columns), it is not suitable for the 3-sum construction.
-        # Search for an alternative non-degenerate partition instead.
-        if _is_degenerate(A) || _is_degenerate(D)
-            found2, (A2, B2, C2, D2) = _decompose(M; reject_degenerate_3sum = true)
-            if !found2
-                # Every rB+rC≤2 partition found has degenerate A/D, which rules
-                # out the 3-sum construction but not TU. Fall back to the
-                # partition algorithm (exponential but exact).
-                return _tu_partition(M)
-            end
-            rB2 = _rank_int(B2); rC2 = _rank_int(C2)
-            return _apply_decomposition(M, A2, B2, C2, D2, rB2, rC2, depth, seen, fast)
-        end
-
+        # Case 4 needs M to be reduced, connected and free of 2-separations,
+        # which holds here: the default route runs the 2-separation search
+        # first and the exhaustive ≤12×12 search prefers splits of lower
+        # rank, and a pivot (Cases 5/6) preserves all three. It does not need
+        # A or D to be reduced themselves. An earlier version rejected splits
+        # whose A or D had a trivial row or column or a duplicate pair, and
+        # searched for another split; on larger matrices there is usually
+        # none.
         f_B, g_B = _extract_rank1(B)
         f_C, g_C = _extract_rank1(C)
         B_rows    = findall(!iszero, f_B[:, 1])
@@ -2172,34 +2175,46 @@ function _apply_decomposition(M::Matrix{Int},
                _is_tu_recursive(mat2, depth, seen, fast)
 
     elseif rB == 2 && rC == 0
+        # Case 5: pivot on a nonzero of B. A pivot exchanges the roles of its
+        # row and its column, so the same split of the matroid's elements —
+        # the pivot row now counted with side 2, the pivot column with side
+        # 1 — is a split of the pivoted matrix, and there rank(B) =
+        # rank(C) = 1: B becomes its own Schur complement, and C a multiple
+        # of the pivot column of D times the pivot row of A. Case 4 is
+        # applied to that split directly. Searching the pivoted matrix
+        # afresh instead can return another rank-2 split and pivot straight
+        # back.
         pivot_pos = findfirst(!iszero, B)
         pivot_pos === nothing && error("B has rank 2 but no nonzero entries")
         pi, pj = pivot_pos[1], pivot_pos[2]
-        rA = size(A, 1)
-        cA = size(A, 2)
-        row_order = [pi; [i for i in 1:rA if i != pi]; collect(rA+1:rA+size(D,1))]
+        rA, cA = size(A)
+        rD = size(D, 1)
+        row_order = [pi; [i for i in 1:rA if i != pi]; collect(rA+1:rA+rD)]
         col_order = [cA+pj; collect(1:cA); [cA+j for j in 1:size(B,2) if j != pj]]
-        M_full = [A B; zeros(Int,size(D,1),cA) D]
-        M_perm = M_full[row_order, col_order]
-        ok, M_prime = _reduce(pivot(M_perm, 1))
-        ok || return false
-        return _is_tu_recursive(M_prime, depth+1, seen, fast)
+        M_full = [A B; zeros(Int,rD,cA) D]
+        P = pivot(M_full[row_order, col_order], 1)
+        all(x -> -1 <= x <= 1, P) || return false
+        R1 = 2:rA;            C1 = 1:cA+1
+        R2 = [1; rA+1:rA+rD]; C2 = cA+2:size(P, 2)
+        return _apply_pivoted(P, R1, C1, R2, C2, depth, seen, fast)
 
     elseif rB == 0 && rC == 2
+        # Case 6: as Case 5, pivoting on a nonzero of C. The pivot row now
+        # counts with side 1 and the pivot column with side 2.
         pivot_pos = findfirst(!iszero, C)
         pivot_pos === nothing && error("C has rank 2 but no nonzero entries")
         pi, pj = pivot_pos[1], pivot_pos[2]
-        rA = size(A, 1)
-        cA = size(A, 2)
+        rA, cA = size(A)
         rC_size = size(C, 1)
         cD = size(D, 2)
         row_order = [rA+pi; collect(1:rA); [rA+i for i in 1:rC_size if i != pi]]
         col_order = [pj; [j for j in 1:cA if j != pj]; collect(cA+1:cA+cD)]
         M_full = [A zeros(Int,rA,cD); C D]
-        M_perm = M_full[row_order, col_order]
-        ok, M_prime = _reduce(pivot(M_perm, 1))
-        ok || return false
-        return _is_tu_recursive(M_prime, depth+1, seen, fast)
+        P = pivot(M_full[row_order, col_order], 1)
+        all(x -> -1 <= x <= 1, P) || return false
+        R1 = 1:rA+1;                 C1 = 2:cA
+        R2 = rA+2:size(P, 1);        C2 = [1; cA+1:cA+cD]
+        return _apply_pivoted(P, R1, C1, R2, C2, depth, seen, fast)
 
     else
         error("Unexpected rank(B) + rank(C) = $(rB + rC)")
