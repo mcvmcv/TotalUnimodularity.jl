@@ -166,28 +166,71 @@ of a few thousand inputs; see "Structured fuzz" under Testing.
 ## Known Limitations
 
 ### Performance and routing
-No route is polynomial in practice. `_is_tu_irreducible` first runs the
-network, transpose-network and special-matrix tests and the Eulerian k ≤ 3
-pre-filter, then routes the block by size:
+1-sums and 2-sums are split off in polynomial time; what remains is not
+polynomial in practice. `_is_tu_irreducible` runs, in order:
 
-- min(m,n) ≤ 24: the exact branch-and-prune Ghouila-Houri `_tu_partition`
-  test. Measured worst cases (dense TU inputs, which force full exhaustion):
-  ~0.1s at min-dim 16, ~0.5s at 18, ~3s at 20, ~13s at 22; non-TU inputs
-  usually exit in milliseconds.
-- both dimensions > 24: `_decompose` → `_decompose_matroid`, O((m+n)^8).
-  It is effectively unusable: for a 14×14 matrix it enumerates ~3.4×10⁸
-  (S,T) pairs and runs for hours. Its Float64 rank routine is also only
-  argued exact up to ~20 rows.
+1. the network, transpose-network and special-matrix tests;
+2. `_find_two_separation` (see below) — on success the block is split with
+   `_apply_decomposition` (Case 2) and both pieces recurse from the top;
+3. the Eulerian k ≤ 3 pre-filter. It is O(m³n³) in the worst case, which is
+   why it runs after the split: on a splittable matrix only the pieces pay
+   for it;
+4. routing of the block, which now has no 2-separation, by size:
+   - min(m,n) ≤ 24: the exact branch-and-prune Ghouila-Houri `_tu_partition`
+     test. Measured worst cases (dense TU inputs, which force full
+     exhaustion): ~0.1s at min-dim 16, ~0.5s at 18, ~3s at 20, ~13s at 22;
+     non-TU inputs usually exit in milliseconds.
+   - both dimensions > 24 and m + n ≤ 64: `_decompose` →
+     `_decompose_matroid`, O((m+n)^8). It is effectively unusable: for a
+     14×14 matrix it enumerates ~3.4×10⁸ (S,T) pairs and runs for hours. Its
+     Float64 rank routine is also only argued exact up to ~20 rows.
+   - both dimensions > 24 and m + n > 64: `_tu_partition`. Not because it is
+     feasible there, but because `_decompose_matroid` keeps element sets in
+     `UInt64` masks and cannot represent the block at all.
 
 The exhaustive ≤12×12 bipartition search in `_decompose` is used only with
-`fast = false`, i.e. `cmr_is_totally_unimodular(M; algorithm=:decomposition)`.
-The default route skips it because `_tu_partition` is faster at every size
-measured: ~4× in aggregate on composed inputs, and 3 ms against 2.2 s on the
-12×12 CMR Eulerian test matrix. The decomposition code is kept correct by
-running every oracle and regression test through both routes.
+`fast = false`, i.e. `cmr_is_totally_unimodular(M; algorithm=:decomposition)`,
+which also skips step 2 for those blocks so that Cases 2–6 stay reachable
+through the general search. The default route skips it because
+`_tu_partition` is faster at every size measured: ~4× in aggregate on
+composed inputs, and 3 ms against 2.2 s on the 12×12 CMR Eulerian test
+matrix. The decomposition code is kept correct by running every oracle and
+regression test through both routes.
 
-Making the separation search scale (Truemper/CMR-style) is the main open
-performance problem.
+Making the 3-separation search scale (Truemper/CMR-style) is the main open
+performance problem: a large block with no 2-separation that is neither a
+network matrix nor the transpose of one still has no practical route.
+
+### 2-separation search (`_find_two_separation`)
+A 2-separation of a connected matrix is a split with one cross block zero
+and the other of rank 1. Fix a nonzero entry (i0, j0) of the rank-1 block
+M[R1, C2]; then "belongs to side 1" is closed under two single-premise
+rules — a column on side 1 pulls in every row where it is nonzero (keeps
+M[R2, C1] = 0), and a row r on side 1 pulls in every column c whose 2×2
+minor on rows {i0, r}, columns {j0, c} is nonzero (keeps M[R1, C2] rank 1).
+The rules are the edges of a digraph on the other m+n-2 rows and columns,
+and a 2-separation with that pivot exists iff the digraph is not strongly
+connected: any nonempty proper closed set is a valid side 1. Three searches
+per pivot decide that (forward from a node, backward to it, forward from a
+node that cannot reach it), so the whole search is O(nnz · m · n).
+
+The function is specified for reduced, connected matrices, which is what
+`_is_tu_irreducible` passes it; the unit test checks it against brute-force
+enumeration of all splits under the same precondition.
+
+### Recursion depth counts pivots only
+`depth` used to be incremented on every recursive call, with a cutoff at
+100 that falls back to `_tu_partition`. A 2-sum chain of k blocks recurses
+k deep, so a chain of more than 100 blocks would hit the cutoff and hand a
+huge matrix to the exponential test. The sum cases (1–4) always recurse on strictly smaller
+matrices and cannot run away, so only the pivot cases (5/6) increment
+`depth` now.
+
+### Eulerian filter skips zero columns
+For a fixed row subset, `_tu_eulerian` only considers columns with an even
+and *nonzero* number of nonzeros in those rows. A minimal non-TU submatrix
+is nonsingular, so it has no zero column; the criterion stays exact and
+sparse matrices lose most of their candidate columns.
 
 ### Ghouila-Houri: keep subset choice and sign search separate
 `_tu_partition` enumerates subsets in an outer phase and searches signs in an
@@ -252,7 +295,10 @@ flips one entry in about a third of them, and checks both routes against
 `_tu_partition`. The bugs it has found occur at rates of 1/800 to 1/6000,
 so the 2000 seeded inputs in the suite are a smoke test: after changing
 `_apply_decomposition`, `_decompose` or the recursion, run the generator
-over several seeds × ~8000 inputs.
+over several seeds × ~8000 inputs. The generator caps matrices at 12×12, so
+the `:decomposition` route never calls `_find_two_separation` on them; the
+default route does. Raising the cap (18×18 was used when the 2-sum split
+went in) exercises it on both.
 
 ### Known test matrices
 - `F_1`, `F_2`: TU, non-network, non-decomposable

@@ -1188,6 +1188,118 @@ function _reachable_bitmask(edges::Vector{Tuple{Int,Int}}, n_edges::Int,
     visited & ~W_mask & ~ST_mask
 end
 
+# Search of the rule digraph of _find_two_separation for pivot (i0, j0), from
+# node `start` (rows as i, columns as m + j), marking inR/inC; returns the
+# number of nodes reached. Forward follows the two rules; backward follows
+# them in reverse, which swaps which rule applies to rows and to columns.
+# Row i0 and column j0 are not nodes.
+function _two_separation_reach!(inR::BitVector, inC::BitVector, queue::Vector{Int},
+                                M::Matrix{Int}, i0::Int, j0::Int,
+                                start::Int, forward::Bool)::Int
+    m, n = size(M)
+    p = M[i0, j0]
+    fill!(inR, false)
+    fill!(inC, false)
+    start <= m ? (inR[start] = true) : (inC[start - m] = true)
+    queue[1] = start
+    head = 0; tail = 1
+    @inbounds while head < tail
+        v = queue[head += 1]
+        if (v <= m) == forward
+            # minor rule: row → columns (forward), column → rows (backward)
+            if v <= m
+                q = M[v, j0]
+                for c in 1:n
+                    (inC[c] || c == j0) && continue
+                    p * M[v, c] == M[i0, c] * q && continue
+                    inC[c] = true; queue[tail += 1] = m + c
+                end
+            else
+                c = v - m
+                q = M[i0, c]
+                for r in 1:m
+                    (inR[r] || r == i0) && continue
+                    p * M[r, c] == q * M[r, j0] && continue
+                    inR[r] = true; queue[tail += 1] = r
+                end
+            end
+        else
+            # support rule: column → rows (forward), row → columns (backward)
+            if v <= m
+                for c in 1:n
+                    (inC[c] || c == j0 || iszero(M[v, c])) && continue
+                    inC[c] = true; queue[tail += 1] = m + c
+                end
+            else
+                c = v - m
+                for r in 1:m
+                    (inR[r] || r == i0 || iszero(M[r, c])) && continue
+                    inR[r] = true; queue[tail += 1] = r
+                end
+            end
+        end
+    end
+    tail
+end
+
+"""
+    _find_two_separation(M)
+
+Search for a 2-separation of `M`: a split of the rows into R1 ∪ R2 and the
+columns into C1 ∪ C2, each side holding at least two rows-plus-columns, with
+
+    M[R2, C1] = 0   and   rank M[R1, C2] = 1.
+
+Returns `(R1, C1)` as sorted index vectors, or `nothing` if `M` has no
+2-separation. `M` must have entries in {-1, 0, 1}. Every 2-separation of a
+connected matrix has exactly one nonzero cross block, so naming the sides so
+that it is `M[R1, C2]` loses no generality.
+
+Polynomial, O(nnz · m · n). Fix a nonzero entry (i0, j0) of the rank-1 block:
+row i0 is on side 1, column j0 on side 2. Membership of side 1 is then closed
+under two single-premise rules:
+
+  * a column on side 1 pulls in every row where it is nonzero (keeps
+    M[R2, C1] = 0);
+  * a row r on side 1 pulls in every column c for which the 2×2 minor on
+    rows {i0, r}, columns {j0, c} is nonzero (a block with M[i0, j0] ≠ 0 has
+    rank 1 iff all 2×2 minors through that entry vanish).
+
+So the rules form a digraph on the other m+n-2 rows and columns, and the
+valid choices of side 1 are exactly {i0} ∪ S for S a nonempty proper subset
+closed under its edges. Such an S exists iff the digraph is not strongly
+connected, which three searches decide: forward from any node v, backward to
+v, and — if something cannot reach v — forward from that node.
+"""
+function _find_two_separation(M::Matrix{Int})::Union{Nothing, Tuple{Vector{Int}, Vector{Int}}}
+    m, n = size(M)
+    (m + n < 4 || m < 1 || n < 1) && return nothing
+    n_nodes = m + n - 2
+    inR = falses(m)
+    inC = falses(n)
+    queue = Vector{Int}(undef, m + n)    # rows as i, columns as m + j
+
+    for j0 in 1:n, i0 in 1:m
+        iszero(M[i0, j0]) && continue
+        reach!(start, forward) =
+            _two_separation_reach!(inR, inC, queue, M, i0, j0, start, forward)
+
+        v = i0 == 1 ? (m >= 2 ? 2 : (j0 == 1 ? m + 2 : m + 1)) : 1   # any node
+        if reach!(v, true) == n_nodes
+            reach!(v, false) == n_nodes && continue     # strongly connected
+            u = 0                                        # a node that cannot reach v
+            for r in 1:m; (r == i0 || inR[r]) || (u = r; break); end
+            if u == 0
+                for c in 1:n; (c == j0 || inC[c]) || (u = m + c; break); end
+            end
+            reach!(u, true)
+        end
+        inR[i0] = true
+        return (findall(inR), findall(inC))
+    end
+    return nothing
+end
+
 """
     _extract_rank1(B)
 
@@ -1465,10 +1577,13 @@ After reduction and splitting into connected blocks, each block is tested for
 being a network matrix, the transpose of one, or one of the special matrices
 [`F_1`](@ref), [`F_2`](@ref) (Schrijver, *Theory of Linear and Integer
 Programming*, Theorems 20.1 and 20.3). Blocks that are none of these are
-decided by an exact branch-and-prune Ghouila-Houri test when their smaller
-dimension is at most 24, and by Seymour decomposition beyond that. To run the
-decomposition on small matrices as well, use
-`cmr_is_totally_unimodular(M; algorithm = :decomposition)`.
+split along 2-separations (2-sums), found in polynomial time, for as long as
+one exists. A block with no 2-separation is decided by an exact
+branch-and-prune Ghouila-Houri test, which is exponential in the block's
+smaller dimension and practical up to about 22; only blocks with both
+dimensions above 24 and at most 64 rows plus columns go to the Seymour
+decomposition search instead. To run the decomposition on small matrices as
+well, use `cmr_is_totally_unimodular(M; algorithm = :decomposition)`.
 
 Any `AbstractMatrix` with integer-valued entries is accepted; entries outside
 {-1, 0, 1} make the matrix trivially non-TU, so `false` is returned.
@@ -1512,14 +1627,16 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, fa
     ok, M = _reduce(M)
     ok || return false
     (size(M, 1) == 0 || size(M, 2) == 0) && return true
-    # Runaway recursion says nothing about M; decide it exactly instead.
+    # `depth` counts pivot steps (Cases 5/6) only: every sum case recurses on
+    # strictly smaller matrices, so only pivots can run away. Runaway
+    # recursion says nothing about M; decide it exactly instead.
     depth > 100 && return _tu_partition(M)
 
     # 1-sum: split into connected components and test each independently.
     # O(m·n) bipartite BFS — far cheaper than any subsequent step.
     let comps = _bipartite_components(M)
         if comps !== nothing
-            return all(((rows, cols),) -> _is_tu_recursive(M[rows, cols], depth+1, seen, fast), comps)
+            return all(((rows, cols),) -> _is_tu_recursive(M[rows, cols], depth, seen, fast), comps)
         end
     end
 
@@ -1544,27 +1661,44 @@ function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, 
     _is_network_matrix(Matrix{Int}(M')) && return true
     _is_special_matrix(M) && return true
 
+    # 2-sum splitting: a polynomial search for a 2-separation, so that the
+    # exponential test below only ever sees blocks that cannot be split this
+    # way — cost is then exponential in the largest such block rather than
+    # in the whole matrix. With `fast = false`, blocks up to 12×12 skip this
+    # and take the exhaustive Seymour decomposition search instead
+    # (cmr_is_totally_unimodular's :decomposition).
+    m, n = size(M)
+    legacy = !fast && m <= 12 && n <= 12
+    if !legacy
+        sep = _find_two_separation(M)
+        if sep !== nothing
+            R1, C1 = sep
+            R2 = setdiff(1:m, R1)
+            C2 = setdiff(1:n, C1)
+            return _apply_decomposition(M, M[R1, C1], M[R1, C2], M[R2, C1], M[R2, C2],
+                                        1, 0, depth, seen, fast)
+        end
+    end
+
     # Quick non-TU detector: Eulerian check at k ≤ 3 catches most violations
-    # (e.g. any 2×2 or 3×3 bad submatrix) in microseconds, before the O(4^m)
-    # bipartition search runs.
+    # (e.g. any 2×2 or 3×3 bad submatrix) before the exponential searches
+    # run. It costs O(m³n³) in the worst case, so it runs after the 2-sum
+    # split: on a splittable matrix only the pieces pay for it.
     _tu_eulerian(M, 3) || return false
 
-    # When the smaller dimension is modest, the exact branch-and-prune
-    # Ghouila-Houri test is the fastest route: measured worst cases (dense TU
-    # matrices, which force exhaustion) are ~0.5s at min-dim 18, ~3s at 20,
-    # ~13s at 22; non-TU inputs usually exit in milliseconds. It also beats
-    # the exhaustive ≤12×12 bipartition search (~4x in aggregate on composed
-    # inputs, seconds vs milliseconds in the worst case), so `fast` mode uses
-    # it there too; with `fast = false` those matrices take the Seymour
-    # decomposition path (cmr_is_totally_unimodular's :decomposition).
-    # Beyond 12×12 the alternative is the matroid-intersection search, which
-    # enumerates ~C(m+n,4)² (S,T) pairs — hours for a 14×14 matrix — so the
-    # partition test is used in both modes. Beyond the cap, the matroid
-    # search is the only option — and impractically slow, see
-    # IMPLEMENTATION_NOTES.md.
-    m, n = size(M)
-    if min(m, n) <= 24 && (fast || m > 12 || n > 12)
-        return _tu_partition(M)
+    if !legacy
+
+        # When the smaller dimension is modest, the exact branch-and-prune
+        # Ghouila-Houri test is the fastest route: measured worst cases (dense
+        # TU matrices, which force exhaustion) are ~0.5s at min-dim 18, ~3s at
+        # 20, ~13s at 22; non-TU inputs usually exit in milliseconds. It also
+        # beats the exhaustive ≤12×12 bipartition search (~4x in aggregate on
+        # composed inputs, seconds vs milliseconds in the worst case).
+        # Beyond the cap only the matroid-intersection search remains, which
+        # enumerates ~C(m+n,4)² (S,T) pairs — hours for a 14×14 matrix — and
+        # whose UInt64 element masks cannot represent more than 64 rows plus
+        # columns at all. See IMPLEMENTATION_NOTES.md.
+        (min(m, n) <= 24 || m + n > 64) && return _tu_partition(M)
     end
 
     found, (A, B, C, D) = _decompose(M)
@@ -1590,17 +1724,17 @@ function _apply_decomposition(M::Matrix{Int},
                                rB::Int, rC::Int,
                                depth::Int, seen::Set{Matrix{Int}}, fast::Bool)::Bool
     if rB == 0 && rC == 0
-        return _is_tu_recursive(A, depth+1, seen, fast) && _is_tu_recursive(D, depth+1, seen, fast)
+        return _is_tu_recursive(A, depth, seen, fast) && _is_tu_recursive(D, depth, seen, fast)
 
     elseif rB == 1 && rC == 0
         f, g = _extract_rank1(B)
-        return _is_tu_recursive([A f], depth+1, seen, fast) &&
-               _is_tu_recursive([g; D], depth+1, seen, fast)
+        return _is_tu_recursive([A f], depth, seen, fast) &&
+               _is_tu_recursive([g; D], depth, seen, fast)
 
     elseif rB == 0 && rC == 1
         f, g = _extract_rank1(C)
-        return _is_tu_recursive([A; g], depth+1, seen, fast) &&
-               _is_tu_recursive([f D], depth+1, seen, fast)
+        return _is_tu_recursive([A; g], depth, seen, fast) &&
+               _is_tu_recursive([f D], depth, seen, fast)
 
     elseif rB == 1 && rC == 1
         # If the current partition is degenerate (A or D has trivial/dependent
@@ -1675,8 +1809,8 @@ function _apply_decomposition(M::Matrix{Int},
         mat2 = [ε₁                   0                     ones(Int,1,nBK)       zeros(Int,1,nnotBK)
                 ones(Int,nCR,1)      ones(Int,nCR,1)       D1                    D2
                 zeros(Int,nnotCR,1)  zeros(Int,nnotCR,1)   D3                    D4   ]
-        return _is_tu_recursive(mat1, depth+1, seen, fast) &&
-               _is_tu_recursive(mat2, depth+1, seen, fast)
+        return _is_tu_recursive(mat1, depth, seen, fast) &&
+               _is_tu_recursive(mat2, depth, seen, fast)
 
     elseif rB == 2 && rC == 0
         pivot_pos = findfirst(!iszero, B)
@@ -1892,10 +2026,14 @@ function _tu_eulerian(M::Matrix{Int}, max_k::Int = typemax(Int))::Bool
             end
             return true
         else
-            # k rows chosen. Usable columns = those with even nonzero count.
+            # k rows chosen. Usable columns = those with even, nonzero count
+            # of nonzeros. A column that is zero on the chosen rows can be
+            # skipped: every minimal non-TU submatrix is Eulerian with sum
+            # ≡ 2 (mod 4) and is nonsingular, so it has no zero column — the
+            # criterion stays exact, and sparse matrices lose most candidates.
             n_use = 0
             for j in 1:c
-                if col_nz[j] % 2 == 0; n_use += 1; use_cols[n_use] = j; end
+                if col_nz[j] > 0 && col_nz[j] % 2 == 0; n_use += 1; use_cols[n_use] = j; end
             end
             n_use < k && return true                            # too few usable cols
             enum_cols(k, 0, n_use)
@@ -1924,8 +2062,9 @@ algorithms from the CMR library (`src/cmr/tu.c`, `CMRtuTest`):
 | `:eulerian`      | `CMR_TU_ALGORITHM_EULERIAN`      | Eulerian submatrix criterion      |
 | `:partition`     | `CMR_TU_ALGORITHM_PARTITION`     | Ghouila-Houri partition criterion |
 
-**`:decomposition`** runs the Seymour decomposition of Theorem 20.3 on blocks
-up to 12×12 (where [`is_totally_unimodular`](@ref) would use the faster
+**`:decomposition`** runs the Seymour decomposition of Theorem 20.3, with its
+exhaustive separation search, on blocks up to 12×12 (where
+[`is_totally_unimodular`](@ref) would use the 2-sum split and the faster
 Ghouila-Houri test); larger blocks are handled as in `is_totally_unimodular`.
 
 **`:eulerian`** — M is TU iff every square Eulerian submatrix (each row and column

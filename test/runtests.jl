@@ -180,6 +180,32 @@ include("test_cmr.jl")
         @test tu_both_routes(M12)
     end
 
+    # Matrices far beyond the exponential test's reach are decided by
+    # splitting off 2-sum pieces first. A k-fold chain of K33 / K33ᵀ-type
+    # blocks is TU; gluing on a block that contains a non-TU 3×3 keeps that
+    # 3×3 as a submatrix, so the result is not TU.
+    @testset "2-sum splitting of large matrices" begin
+        function chain(k)
+            M = K33
+            for i in 1:k
+                M = two_sum(M, isodd(i) ? K33dual_twosum : K33)
+            end
+            M
+        end
+        bad = [1 1 1; 1 1 0; 1 0 1; 0 1 1]      # first row is the glue row
+        @test !naive_is_totally_unimodular(bad[2:end, :])
+        for k in (5, 12, 40)
+            M = chain(k)
+            @test minimum(size(M)) > 20
+            @test is_totally_unimodular(M)
+            @test is_totally_unimodular(Matrix{Int}(M'))
+            @test !is_totally_unimodular(two_sum(M, bad))
+            perm_r = randperm(MersenneTwister(k), size(M, 1))
+            perm_c = randperm(MersenneTwister(k + 1), size(M, 2))
+            @test is_totally_unimodular(M[perm_r, perm_c])
+        end
+    end
+
     # An exception inside is_totally_unimodular fails these tests: it is a
     # predicate and must return an answer for every {-1,0,1} matrix.
     @testset "is_totally_unimodular vs naive (random, extended)" begin

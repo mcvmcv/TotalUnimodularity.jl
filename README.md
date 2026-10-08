@@ -6,9 +6,10 @@ decomposition theorem.
 See [total unimodularity](https://en.wikipedia.org/wiki/Unimodular_matrix#Total_unimodularity).
 
 > **Note:** the algorithm of Schrijver's Theorem 20.3 is polynomial-time, but
-> this implementation is not: its separation search is exhaustive, and
-> mid-sized matrices are decided by an exact exponential-time test. See
-> [Performance](#performance) for the practical limits.
+> this implementation is not. 1-sums and 2-sums are split off in polynomial
+> time, but a block that cannot be split that way is decided by an exact
+> exponential-time test. See [Performance](#performance) for the practical
+> limits.
 
 ## What is Total Unimodularity?
 
@@ -96,9 +97,11 @@ Programming* (Chapters 19–20), implementing Theorem 20.3:
    rank(B) + rank(C) ≤ 2 (Theorem 20.2), then recurse on the six cases
    of Theorem 20.3.
 
-By default, step 4 is replaced by an exact Ghouila-Houri partition test
-whenever the smaller dimension is at most 24, because it is faster in
-practice; see [Performance](#performance).
+By default, step 4 is carried out differently: 2-separations
+(rank(B) + rank(C) ≤ 1) are found by a polynomial search and split off, and a
+block with no 2-separation is decided by an exact Ghouila-Houri partition
+test, because that is faster in practice than the general separation search;
+see [Performance](#performance).
 
 See [THEORY.md](THEORY.md) for full mathematical details and
 [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for implementation
@@ -106,21 +109,34 @@ decisions and known issues.
 
 ## Performance
 
-`is_totally_unimodular` is practical when the smaller dimension of the
-(reduced) matrix is at most about 22. After the polynomial-time network and
-special-matrix tests and a cheap Eulerian pre-filter, a block that is still
-undecided is routed by size:
+The cost of `is_totally_unimodular` is governed by the largest block that
+is left after all polynomial-time steps, not by the size of the input. Those
+steps are: reduction, splitting into connected components (1-sums), the
+network and special-matrix tests, and splitting along 2-separations (2-sums),
+each applied again to the pieces. A matrix built from small pieces by 1- and
+2-sums is therefore decided quickly at any size, as is any network matrix or
+transpose of one.
+
+A block that survives all of that — it has no 2-separation and is neither a
+network matrix, the transpose of one, nor F_1/F_2 — first passes a cheap
+Eulerian pre-filter and is then routed by size:
 
 - **Smaller dimension ≤ 24:** an exact branch-and-prune Ghouila-Houri
   partition test. It is exponential in the smaller dimension, but answers in
   milliseconds for typical inputs (worst case ~seconds up to min-dimension
   20, ~13s at 22).
-- **Both dimensions > 24:** Seymour decomposition with the
-  matroid-intersection separation search of Theorem 20.2, O((m+n)^8) and
-  impractically slow at these sizes.
+- **Both dimensions > 24:** no practical route. Up to 64 rows plus columns
+  the block goes to the Seymour decomposition with the matroid-intersection
+  separation search of Theorem 20.2, O((m+n)^8); beyond that, to the
+  Ghouila-Houri test. Both are impractically slow at these sizes.
+
+So the practical limit is a smaller dimension of about 22 *for such a block*.
+The remaining gap to a polynomial algorithm is the search for 3-separations
+(3-sums), which is still exhaustive.
 
 `cmr_is_totally_unimodular(M; algorithm=:decomposition)` instead runs the
-Seymour decomposition on blocks up to 12×12, finding the separation by
+Seymour decomposition on blocks up to 12×12 (without the 2-sum split), finding
+the separation by
 enumerating all row/column bipartitions with a word-parallel GF(2) rank
 prefilter (rank mod 2 never exceeds rational rank). It gives the same
 answers but is slower — about 4× in aggregate on composed inputs, and 2.2 s
@@ -141,11 +157,13 @@ The "path" column shows which stage of the algorithm decides the answer.
 | R12 | 6×6 | true | 171 µs | 83 µs | Ghouila-Houri |
 | Fano | 3×4 | false | 6 µs | 36 µs | Eulerian k≤3 filter |
 | one_sum(K₃₃, K₃₃) | 10×8 | true | 11.7 ms | 86 µs | 1-sum component split |
-| two_sum(K₃₃, K₃₃ᵈ) | 8×8 | true | 3.2 ms | 243 µs | Ghouila-Houri |
-| CMR Eulerian test | 12×12 | false | 1.4 s | 3.0 ms | Ghouila-Houri |
-| CMR partition test | 14×14 | false | 15.7 s | 17.5 ms | Ghouila-Houri |
-| 2-sum chain | 15×15 | true | — (infeasible) | 31 ms | Ghouila-Houri |
-| 2-sum chain | 22×22 | true | — (infeasible) | 5.8 s | Ghouila-Houri |
+| two_sum(K₃₃, K₃₃ᵈ) | 8×8 | true | 3.2 ms | 116 µs | 2-sum split |
+| CMR Eulerian test | 12×12 | false | 1.4 s | 2.5 ms | Ghouila-Houri |
+| CMR partition test | 14×14 | false | 15.7 s | 13.4 ms | Ghouila-Houri |
+| 2-sum chain | 15×15 | true | — (infeasible) | 0.45 ms | 2-sum split |
+| 2-sum chain | 22×22 | true | — (infeasible) | 1.0 ms | 2-sum split |
+| 2-sum chain | 145×144 | true | — (infeasible) | 138 ms | 2-sum split |
+| 2-sum chain | 705×704 | true | — (infeasible) | 59 s | 2-sum split |
 
 For tiny matrices the naive checker wins on constant factors;
 `is_totally_unimodular` pulls ahead from ~6×6 and remains usable far beyond
@@ -169,7 +187,9 @@ The test suite verifies `is_totally_unimodular` against
 `naive_is_totally_unimodular` on 2000 random matrices of size up to 5×6, and
 against the exact Ghouila-Houri test on larger random matrices and on 2000
 structured inputs (sums of F_1, F_2, K₃,₃ and network matrices with random
-pivots and scalings) that exercise the decomposition cases.
+pivots and scalings) that exercise the decomposition cases. The 2-separation
+search is checked against brute-force enumeration on small matrices, and
+2-sum chains up to 145×144 are tested end to end.
 
 ## Background
 

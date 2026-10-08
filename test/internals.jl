@@ -1,7 +1,8 @@
 using Random
 using Graphs
 
-import TotalUnimodularity: _tu_partition, _gf2_rank_capped,
+import TotalUnimodularity: _tu_partition, _gf2_rank_capped, _find_two_separation,
+                            _rank_int, _bipartite_components,
                             _is_trivial_vector,
                             _is_special_matrix, _drop_trivial_vectors,
                             _has_dependent_rows,
@@ -430,6 +431,64 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
             @test _det_int!(copy(M)) == round(Int, det(Rational{BigInt}.(M)))
         end
         @test _det_int!(zeros(Int, 0, 0)) == 1
+    end
+
+    @testset "_find_two_separation" begin
+        # Brute force: is there any split of rows ∪ columns into two sides of
+        # at least two elements each with rank(B) + rank(C) ≤ 1?
+        function has_two_separation(M)
+            m, n = size(M)
+            for mask in 1:(1 << (m + n)) - 2
+                2 <= count_ones(mask) <= m + n - 2 || continue
+                R1 = [i for i in 1:m if (mask >> (i - 1)) & 1 == 1]
+                C1 = [j for j in 1:n if (mask >> (m + j - 1)) & 1 == 1]
+                R2 = setdiff(1:m, R1)
+                C2 = setdiff(1:n, C1)
+                _rank_int(M[R1, C2]) + _rank_int(M[R2, C1]) <= 1 && return true
+            end
+            false
+        end
+
+        rng = MersenneTwister(31)
+        n_found = 0
+        n_none = 0
+        for trial in 1:1500
+            M = if isodd(trial)     # 2-sums of small random blocks: usually separable
+                two_sum(rand(rng, (-1, 0, 1), rand(rng, 2:3), rand(rng, 2:4)),
+                        rand(rng, (-1, 0, 1), rand(rng, 2:4), rand(rng, 2:3)))
+            else                    # dense random: usually not
+                p = 0.4 + 0.5rand(rng)
+                [rand(rng) < p ? rand(rng, (-1, 1)) : 0
+                 for _ in 1:rand(rng, 3:6), _ in 1:rand(rng, 3:6)]
+            end
+            # The search is specified for reduced, connected matrices.
+            _, M = _reduce(M)
+            (size(M, 1) < 2 || size(M, 2) < 2) && continue
+            _bipartite_components(M) === nothing || continue
+
+            sep = _find_two_separation(M)
+            if sep === nothing
+                n_none += 1
+                @test !has_two_separation(M)
+            else
+                n_found += 1
+                R1, C1 = sep
+                R2 = setdiff(1:size(M, 1), R1)
+                C2 = setdiff(1:size(M, 2), C1)
+                @test all(iszero, M[R2, C1])
+                @test _rank_int(M[R1, C2]) == 1
+                @test length(R1) + length(C1) >= 2
+                @test length(R2) + length(C2) >= 2
+            end
+        end
+        # Both outcomes must be well represented.
+        @test n_found > 50
+        @test n_none > 50
+
+        @test _find_two_separation(F_1) === nothing
+        @test _find_two_separation(F_2) === nothing
+        @test _find_two_separation(two_sum(F_1, F_2)) !== nothing
+        @test _find_two_separation(zeros(Int, 1, 1)) === nothing
     end
 
     @testset "_find_epsilon" begin

@@ -191,8 +191,30 @@ Symmetric to Case 5, pivot on a nonzero entry of C.
 
 ### Cycle Detection
 Cases 5 and 6 can cycle (the pivot may produce a matrix that decomposes
-again as Case 5/6, leading to an infinite loop). A set of previously seen
-matrices is maintained; if the same matrix is encountered again, return false.
+again as Case 5/6, leading to an infinite loop). The matrices on the current
+recursion path are recorded; if one is encountered again, the decomposition
+has made no progress and the matrix is decided with the exact Ghouila-Houri
+test instead. A cycle says nothing about total unimodularity.
+
+### 2-separations in polynomial time
+Cases 2 and 3 (rank(B) + rank(C) = 1) do not need the general search of
+Theorem 20.2. Suppose M is connected, C = 0 and rank(B) = 1, and fix a
+nonzero entry (i0, j0) of B, so row i0 is in the top part and column j0 in
+the right part. Then:
+
+- if a column is in the left part, every row where it is nonzero must be in
+  the top part (otherwise C ≠ 0);
+- if a row r is in the top part, every column c with
+  M[i0,j0]·M[r,c] ≠ M[i0,c]·M[r,j0] must be in the left part (otherwise B has
+  a nonzero 2×2 minor through (i0, j0), and a matrix with a nonzero entry has
+  rank 1 iff all such minors vanish).
+
+Each rule has a single premise, so together they define a digraph on the
+remaining rows and columns, and the admissible top-left parts are exactly
+the nonempty proper subsets closed under its edges. One exists iff the
+digraph is not strongly connected. Trying every nonzero entry as (i0, j0)
+finds a 2-separation whenever there is one; the case rank(C) = 1, B = 0 is
+the same statement with the two sides renamed.
 
 ## Seymour Decomposition Test (Theorem 20.2)
 
@@ -219,20 +241,19 @@ Performance optimisation of this step is a significant open task.
 
 ## Known Issues and Limitations
 
-1. **Performance:** `_decompose` (Theorem 20.2) becomes slow for matrices
-   larger than ~8×10. The O(N^8) outer loop needs further optimisation
-   (rank-update caching, S/T pair pruning). The inner rank computation
-   uses Bareiss integer elimination (18× faster than SVD for small matrices).
+1. **Performance:** the general separation search of Theorem 20.2 is
+   exhaustive and impractical beyond about 12×12, so the default route does
+   not use it: 2-separations are found by the polynomial search above, and a
+   block without one is decided by the exact (exponential) Ghouila-Houri
+   test. A polynomial search for 3-separations is the missing piece. See
+   IMPLEMENTATION_NOTES.md for the routing and measured limits.
 
-2. **Cycle detection:** Cases 5 and 6 use a `seen` set to detect cycles.
-   Returning `false` on cycle detection is safe (no false positives) but
-   may give false negatives for some TU matrices if the algorithm cycles.
-   In practice, all tested matrices agree with `naive_is_totally_unimodular`.
+2. **Cycle detection:** a pivot cycle in Cases 5 and 6 is resolved with the
+   Ghouila-Houri test (see above), so it costs time but not correctness.
 
-3. **Case 4 degeneracy:** When the decomposition produces A or D with
-   dependent/trivial rows or columns, Case 4 returns `false` defensively.
-   This is correct for non-TU matrices but may give false negatives for
-   some TU matrices.
+3. **Case 4 degeneracy:** when the decomposition produces A or D with
+   dependent/trivial rows or columns, another partition is sought; if none
+   exists the matrix is likewise decided with the Ghouila-Houri test.
 
 ## References
 
