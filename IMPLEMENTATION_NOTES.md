@@ -198,8 +198,9 @@ The exhaustive ≤12×12 bipartition search in `_decompose` is used only with
 `fast = false`, i.e. `cmr_is_totally_unimodular(M; algorithm=:decomposition)`,
 which also skips steps 2, 4 and 5 for those blocks. It is an independent
 implementation of the search, and every oracle and regression test runs
-through both routes. `_decompose_matroid` is no longer reachable from either
-route (`_decompose` only falls through to it above 12×12).
+through both routes. The matroid-intersection search (`_decompose_matroid`,
+`_solve_submodular` and their rank caches) was removed once nothing could
+reach it; `_decompose` now refuses matrices above 12×12.
 
 `_tu_partition` remains as a fallback in three places: a matrix repeated on
 the recursion path, more than 100 nested pivots, and `_find_epsilon` finding
@@ -256,9 +257,9 @@ Schrijver's construction needs M to be reduced, connected and free of
 2-separations, not A and D. Bug 3 dates from before 2-separations were
 split off first, when the matrix reaching Case 4 could still have one. On
 larger matrices there is usually no split that passes the old test — none
-on the K_n ⊕₃ K_m* family at any size — so the rejection was removed. The
-`reject_degenerate_3sum` keyword of `_decompose` is no longer passed by any
-caller.
+on the K_n ⊕₃ K_m* family at any size — so the rejection was removed,
+together with the `reject_degenerate_3sum` keyword of `_decompose` and the
+`_is_degenerate` predicate.
 
 ### 2-separation search (`_find_two_separation`)
 A 2-separation of a connected matrix is a split with one cross block zero
@@ -376,12 +377,6 @@ The inner rank computation uses `_rank_int` (Bareiss integer elimination),
 which is ~18× faster than `LinearAlgebra.rank` (SVD) for the small {-1,0,1}
 matrices encountered here. The 2000-trial random test suite now completes
 in ~30 seconds (previously ~150 CPU-minutes with SVD).
-
-Further acceleration opportunities:
-- Incremental rank updates: precompute column echelon form of SZ once,
-  check each v for independence in O(m²) rather than recomputing from scratch
-- Pruning the outer S,T loop using matroid intersection theory
-- Caching rank computations for repeated column subsets
 
 ## Testing
 

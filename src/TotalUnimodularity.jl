@@ -156,41 +156,6 @@ function _is_special_matrix(M::Matrix{Int})
     return false
 end
 
-# Return true if any two rows of M are equal or negatives of each other.
-function _has_dependent_rows(M::Matrix{Int})
-    r = size(M, 1)
-    for i in 1:r-1
-        for j in i+1:r
-            @views M[i,:] == M[j,:] && return true
-            @views M[i,:] == -M[j,:] && return true
-        end
-    end
-    return false
-end
-
-# Return true if any two columns of M are equal or negatives of each other.
-function _has_dependent_cols(M::Matrix{Int})
-    c = size(M, 2)
-    for i in 1:c-1
-        for j in i+1:c
-            @views M[:,i] == M[:,j] && return true
-            @views M[:,i] == -M[:,j] && return true
-        end
-    end
-    return false
-end
-
-# Return true if M has any dependent rows or columns.
-_has_dependent_vectors(M::Matrix{Int}) =
-    _has_dependent_rows(M) || _has_dependent_cols(M)
-
-# Return true if M is "degenerate" for the 3-sum (Case 4) construction:
-# any row/column has ≤1 nonzero, or any two rows/columns are equal or opposite.
-_is_degenerate(M::Matrix{Int}) =
-    any(i -> count(!iszero, @view M[i,:]) <= 1, 1:size(M,1)) ||
-    any(j -> count(!iszero, @view M[:,j]) <= 1, 1:size(M,2)) ||
-    _has_dependent_vectors(M)
-
 # Mark the first vector of each class of equal-or-opposite vectors of M along
 # `dim` (1: rows, 2: columns). Each vector is hashed with the sign that makes
 # its first nonzero positive, so a class shares one hash; vectors with the
@@ -320,14 +285,13 @@ end
 # zero entries stays below ~n·2^n·eps ≈ 5e-9. The 1e-7 pivot threshold sits
 # safely between the two. Integer division (the slow step in Bareiss) is
 # replaced by FP multiply-subtract, giving a 3-5x speedup in practice.
-_rank_float!(B::Matrix{Float64})::Int = _rank_float_view!(B, size(B, 1), size(B, 2))
-
-# Gaussian elimination on B[1..m, 1..n] — works on the leading m×n block of a
-# pre-allocated scratch buffer, so no heap allocation.
+#
+# Works on the leading m×n block of a pre-allocated scratch buffer, so no heap
+# allocation.
 function _rank_float_view!(B::Matrix{Float64}, m::Int, n::Int)::Int
     r = 0
     @inbounds for col in 1:n
-        prow = 0; best = 1e-7  # see threshold note on _rank_float!
+        prow = 0; best = 1e-7  # see threshold note above
         for row in r+1:m
             v = abs(B[row, col])
             if v > best; best = v; prow = row; end
@@ -392,61 +356,6 @@ end
         buf[ri, ci] = M[rows[ri], cols[ci]]
     end
     _rank_float_view!(buf, nr, nc)
-end
-
-# Cached wrappers: same result as _rank_IM(M, m, mask) but avoids recomputing
-# when the same column set appears multiple times in the O(N^8) decompose loop.
-# Int8 array: rank ≤ N ≤ 20, so rank+1 ≤ 21 fits in Int8. Using Int8 instead of
-# Int shrinks the hot working set from ~110KB to ~14KB, keeping it in L1 cache.
-@inline function _rank_IM_cached(cache::Vector{Int8}, M::Matrix{Int}, m::Int, mask::UInt64)::Int
-    idx = Int(mask) + 1
-    v = cache[idx]
-    if v == 0  # 0 = not yet computed; ranks stored as rank+1
-        v = Int8(_rank_IM(M, m, mask) + 1)
-        cache[idx] = v
-    end
-    Int(v) - 1
-end
-@inline function _rank_IM_cached(cache::Dict{UInt64,Int}, M::Matrix{Int}, m::Int, mask::UInt64)::Int
-    v = get(cache, mask, -1)
-    if v == -1
-        v = _rank_IM(M, m, mask)
-        cache[mask] = v
-    end
-    v
-end
-
-# Bitmask version — avoids vector argument allocation entirely.
-# mask bit k-1 set means column k of [I_m | M] is included.
-# Uses Float64 Gaussian elimination (exact for {-1,0,1} matrices, 3-5x faster
-# than Bareiss due to FP multiply-subtract replacing integer division).
-function _rank_IM(M::Matrix{Int}, m::Int, mask::UInt64)::Int
-    iszero(mask) && return 0
-    full_I = m < 64 ? (UInt64(1) << m) - UInt64(1) : typemax(UInt64)
-    I_mask = mask & full_I           # bits for included I-cols
-    M_bits = mask >> m               # bits for included M-cols
-    n_I    = count_ones(I_mask)
-    n_M    = count_ones(M_bits)
-    n_M == 0 && return n_I
-    n_notI = m - n_I
-    n_notI == 0 && return m
-    B = Matrix{Float64}(undef, n_notI, n_M)
-    not_I  = full_I & ~I_mask        # bits for non-included I-rows → row indices of B
-    row = 0
-    nib = not_I
-    @inbounds while !iszero(nib)
-        ibit = nib & -nib; nib &= nib - 1
-        i = trailing_zeros(ibit) + 1
-        row += 1
-        col = 0
-        mb = M_bits
-        while !iszero(mb)
-            mbit = mb & -mb; mb &= mb - 1
-            col += 1
-            B[row, col] = M[i, trailing_zeros(mbit) + 1]
-        end
-    end
-    n_I + _rank_float!(B)
 end
 
 """
@@ -858,17 +767,15 @@ Test whether the rows and columns of `M` can be permuted so that
     M = [A  B]
         [C  D]
 
-with rank(B) + rank(C) ≤ 2 and both A and D having r + c ≥ 4.
+with rank(B) + rank(C) ≤ 2 and both A and D having r + c ≥ 4, by
+enumerating all 2^m × 2^n row/column bipartitions. `M` must be at most
+12×12. Most splits fail on a GF(2) rank bound or on rank(B) alone, so the
+search exits early almost everywhere.
 
-For matrices with m ≤ 12 and n ≤ 12: enumerate all 2^m × 2^n row/column
-bipartitions directly.  This is O(2^m × 2^n × rank) but with aggressive
-early exit (most splits fail on rank(B) alone) and is both simpler and more
-correct than the matroid-intersection approach.
-
-For larger matrices: falls back to the matroid-intersection algorithm
-(Theorem 20.2), which may miss some decompositions. `_is_tu_irreducible`
-only reaches it when both dimensions exceed 24 (smaller matrices beyond
-12×12 go to `_tu_partition`), where it is impractically slow anyway.
+This is the exhaustive counterpart of `_find_two_separation` and
+`_find_three_separation`, used by
+`cmr_is_totally_unimodular(M; algorithm = :decomposition)` as an independent
+check on them.
 
 Returns `(true, (A, B, C, D))` if such a decomposition exists,
 or `(false, (M, M, M, M))` if not.
@@ -876,360 +783,79 @@ or `(false, (M, M, M, M))` if not.
 # Reference
 Schrijver, *Theory of Linear and Integer Programming*, Theorem 20.2.
 """
-function _decompose(M::Matrix{Int};
-                    reject_degenerate_3sum::Bool = false)::Tuple{Bool, NTuple{4, Matrix{Int}}}
+function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
     m, n = size(M)
+    (m <= 12 && n <= 12) ||
+        throw(ArgumentError("_decompose handles matrices up to 12×12, got $m×$n."))
 
-    if m <= 12 && n <= 12
-        # Allocation-free bipartition search.
-        # All index buffers and the Float64 scratch buffer are hoisted outside every
-        # loop level — zero heap allocation inside the O(4^m) hot path.
-        row_top   = Vector{Int}(undef, m)
-        row_bot   = Vector{Int}(undef, m)
-        col_left  = Vector{Int}(undef, n)
-        col_right = Vector{Int}(undef, n)
-        buf       = Matrix{Float64}(undef, m, n)   # scratch for rank computation
+    # Allocation-free bipartition search.
+    # All index buffers and the Float64 scratch buffer are hoisted outside every
+    # loop level — zero heap allocation inside the O(4^m) hot path.
+    row_top   = Vector{Int}(undef, m)
+    row_bot   = Vector{Int}(undef, m)
+    col_left  = Vector{Int}(undef, n)
+    col_right = Vector{Int}(undef, n)
+    buf       = Matrix{Float64}(undef, m, n)   # scratch for rank computation
 
-        # Row support patterns as bitmasks (bit j-1 ⇔ M[i,j] ≠ 0), for the
-        # GF(2) rank prefilter: most candidate bipartitions die on a
-        # word-parallel GF(2) lower bound without ever touching the Float64
-        # rank path or building column index lists.
-        srow = Vector{UInt16}(undef, m)
-        for i in 1:m
-            s = UInt16(0)
-            for j in 1:n; iszero(M[i, j]) || (s |= UInt16(1) << (j - 1)); end
-            srow[i] = s
-        end
-        full_rows = (UInt16(1) << m) - UInt16(1)
-        full_cols = (UInt16(1) << n) - UInt16(1)
+    # Row support patterns as bitmasks (bit j-1 ⇔ M[i,j] ≠ 0), for the
+    # GF(2) rank prefilter: most candidate bipartitions die on a
+    # word-parallel GF(2) lower bound without ever touching the Float64
+    # rank path or building column index lists.
+    srow = Vector{UInt16}(undef, m)
+    for i in 1:m
+        s = UInt16(0)
+        for j in 1:n; iszero(M[i, j]) || (s |= UInt16(1) << (j - 1)); end
+        srow[i] = s
+    end
+    full_rows = (UInt16(1) << m) - UInt16(1)
+    full_cols = (UInt16(1) << n) - UInt16(1)
 
-        # Two-pass search: pass 1 only accepts rB+rC ≤ 1 (2-sums), pass 2
-        # accepts rB+rC ≤ 2 (3-sums and pivots). Preferring 2-sums avoids
-        # choosing pivots that can cause the recursion to cycle back to a
-        # matrix already in `seen`.
-        for pass in 1:2
-            max_sum = pass == 1 ? 1 : 2
-            for rt_mask in UInt16(1):(UInt16(1) << m) - UInt16(2)
-                nrt = count_ones(rt_mask); nrb = m - nrt
-                rb_mask = full_rows & ~rt_mask
-                nt = 0; nb = 0
-                rows_built = false
-                for cl_mask in UInt16(1):(UInt16(1) << n) - UInt16(2)
-                    ncl = count_ones(cl_mask); ncr = n - ncl
-                    nrt + ncl >= 4 || continue
-                    nrb + ncr >= 4 || continue
-                    cr_mask = full_cols & ~cl_mask
-                    # GF(2) lower bounds: rank_GF2 ≤ rank_ℚ, so exceeding the
-                    # budget here rules the candidate out for certain.
-                    gB = _gf2_rank_capped(srow, rt_mask, cr_mask, max_sum + 1)
-                    gB > max_sum && continue
-                    gC = _gf2_rank_capped(srow, rb_mask, cl_mask, max_sum - gB + 1)
-                    gB + gC > max_sum && continue
-                    if !rows_built
-                        for i in 1:m
-                            if (rt_mask >> (i-1)) & 1 == 1; row_top[nt += 1] = i
-                            else;                            row_bot[nb += 1] = i; end
-                        end
-                        rows_built = true
+    # Two-pass search: pass 1 only accepts rB+rC ≤ 1 (2-sums), pass 2
+    # accepts rB+rC ≤ 2 (3-sums and pivots). Preferring 2-sums avoids
+    # choosing pivots that can cause the recursion to cycle back to a
+    # matrix already in `seen`.
+    for pass in 1:2
+        max_sum = pass == 1 ? 1 : 2
+        for rt_mask in UInt16(1):(UInt16(1) << m) - UInt16(2)
+            nrt = count_ones(rt_mask); nrb = m - nrt
+            rb_mask = full_rows & ~rt_mask
+            nt = 0; nb = 0
+            rows_built = false
+            for cl_mask in UInt16(1):(UInt16(1) << n) - UInt16(2)
+                ncl = count_ones(cl_mask); ncr = n - ncl
+                nrt + ncl >= 4 || continue
+                nrb + ncr >= 4 || continue
+                cr_mask = full_cols & ~cl_mask
+                # GF(2) lower bounds: rank_GF2 ≤ rank_ℚ, so exceeding the
+                # budget here rules the candidate out for certain.
+                gB = _gf2_rank_capped(srow, rt_mask, cr_mask, max_sum + 1)
+                gB > max_sum && continue
+                gC = _gf2_rank_capped(srow, rb_mask, cl_mask, max_sum - gB + 1)
+                gB + gC > max_sum && continue
+                if !rows_built
+                    for i in 1:m
+                        if (rt_mask >> (i-1)) & 1 == 1; row_top[nt += 1] = i
+                        else;                            row_bot[nb += 1] = i; end
                     end
-                    nl = 0; nr = 0
-                    for j in 1:n
-                        if (cl_mask >> (j-1)) & 1 == 1; col_left[nl += 1] = j
-                        else;                            col_right[nr += 1] = j; end
-                    end
-                    rB = _rank_submat!(buf, M, row_top, nrt, col_right, ncr)
-                    rB > max_sum && continue
-                    rC = _rank_submat!(buf, M, row_bot, nrb, col_left, ncl)
-                    rB + rC > max_sum && continue
-                    # When requested, skip 3-sum partitions whose A or D subblock is
-                    # degenerate — _apply_decomposition needs non-degenerate A/D to
-                    # construct the Case 4 matrices correctly.
-                    if reject_degenerate_3sum && rB == 1 && rC == 1
-                        (_is_degenerate(M[row_top[1:nrt], col_left[1:ncl]]) ||
-                         _is_degenerate(M[row_bot[1:nrb], col_right[1:ncr]])) && continue
-                    end
-                    return (true, (M[row_top[1:nrt], col_left[1:ncl]],
-                                   M[row_top[1:nrt], col_right[1:ncr]],
-                                   M[row_bot[1:nrb], col_left[1:ncl]],
-                                   M[row_bot[1:nrb], col_right[1:ncr]]))
+                    rows_built = true
                 end
-            end
-        end
-        return (false, (M, M, M, M))
-    end
-
-    # Fall back: matroid-intersection approach for larger matrices.
-    return _decompose_matroid(M; reject_degenerate_3sum)
-end
-
-# Matroid-intersection fallback for matrices that exceed the bipartition threshold.
-function _decompose_matroid(M::Matrix{Int};
-                             reject_degenerate_3sum::Bool = false)::Tuple{Bool, NTuple{4, Matrix{Int}}}
-    m, n = size(M)
-    N = m + n
-    rhoX = m
-
-    valid_masks = UInt64[]
-    for s in combinations(1:N, 4)
-        has_I = false; has_M = false
-        for x in s
-            x <= m ? (has_I = true) : (has_M = true)
-            has_I & has_M && break
-        end
-        has_I & has_M || continue
-        mask = UInt64(0)
-        for x in s; mask |= UInt64(1) << (x - 1); end
-        push!(valid_masks, mask)
-    end
-
-    slow_dbuf = Vector{Tuple{Int,Int}}(undef, 2 * N * N)
-    slow_prev = Vector{Int}(undef, N)
-    slow_bfsq = Vector{Int}(undef, N)
-    if N <= 20
-        return _decompose_loop(M, m, n, rhoX, valid_masks, zeros(Int8, 1 << N),
-                               slow_dbuf, slow_prev, slow_bfsq;
-                               reject_degenerate_3sum)
-    else
-        return _decompose_loop(M, m, n, rhoX, valid_masks, Dict{UInt64, Int}(),
-                               slow_dbuf, slow_prev, slow_bfsq;
-                               reject_degenerate_3sum)
-    end
-end
-
-function _decompose_loop(M::Matrix{Int}, m::Int, n::Int, rhoX::Int,
-                          valid_masks::Vector{UInt64}, cache,
-                          slow_dbuf::Vector{Tuple{Int,Int}},
-                          slow_prev::Vector{Int},
-                          slow_bfsq::Vector{Int};
-                          reject_degenerate_3sum::Bool = false)::Tuple{Bool, NTuple{4, Matrix{Int}}}
-    @inbounds for S_mask in valid_masks
-        @inbounds for T_mask in valid_masks
-            # S and T must be disjoint
-            S_mask & T_mask != 0 && continue
-
-            # Solve problem (16) — returns Y as a bitmask
-            found, Y_mask = _solve_submodular(M, m, S_mask, T_mask, rhoX, cache,
-                                              slow_dbuf, slow_prev, slow_bfsq)
-            found || continue
-
-            # Y∩I-cols → row indices for top partition; Y∩M-cols → col indices for left partition
-            row_top   = [i for i in 1:m if (Y_mask >> (i-1))   & 1 == 1]
-            col_left  = [j for j in 1:n if (Y_mask >> (m+j-1)) & 1 == 1]
-            row_bot   = [i for i in 1:m if (Y_mask >> (i-1))   & 1 == 0]
-            col_right = [j for j in 1:n if (Y_mask >> (m+j-1)) & 1 == 0]
-
-            # Size constraints: A and D must have r + c ≥ 4
-            length(row_top)  + length(col_left)  >= 4 || continue
-            length(row_bot)  + length(col_right) >= 4 || continue
-
-            # Must have at least one row and column in each partition
-            isempty(row_top)  && continue
-            isempty(row_bot)  && continue
-            isempty(col_left) && continue
-            isempty(col_right) && continue
-
-            # Extract submatrices.
-            # Note: rank(B)+rank(C) = rhoY+rhoXminusY-m ≤ 2 is already guaranteed
-            # by found=true from _solve_submodular, so no extra rank check needed.
-            A = M[row_top,  col_left ]
-            B = M[row_top,  col_right]
-            C = M[row_bot,  col_left ]
-            D = M[row_bot,  col_right]
-
-            if reject_degenerate_3sum
-                rB_chk = _rank_int(B); rC_chk = _rank_int(C)
-                if rB_chk == 1 && rC_chk == 1
-                    (_is_degenerate(A) || _is_degenerate(D)) && continue
+                nl = 0; nr = 0
+                for j in 1:n
+                    if (cl_mask >> (j-1)) & 1 == 1; col_left[nl += 1] = j
+                    else;                            col_right[nr += 1] = j; end
                 end
+                rB = _rank_submat!(buf, M, row_top, nrt, col_right, ncr)
+                rB > max_sum && continue
+                rC = _rank_submat!(buf, M, row_bot, nrb, col_left, ncl)
+                rB + rC > max_sum && continue
+                return (true, (M[row_top[1:nrt], col_left[1:ncl]],
+                               M[row_top[1:nrt], col_right[1:ncr]],
+                               M[row_bot[1:nrb], col_left[1:ncl]],
+                               M[row_bot[1:nrb], col_right[1:ncr]]))
             end
-
-            return (true, (A, B, C, D))
         end
     end
     return (false, (M, M, M, M))
-end
-
-# All column sets are represented as UInt64 bitmasks throughout, eliminating
-# the vector-union allocations (S∪Z, SZ∪[v], S∪Zminu∪[v], etc.) that previously
-# dominated the allocation count in the O(N^8) outer loop.
-# rank_cache is shared across all (S,T) pairs in _decompose — the same column-
-# subset rank is queried many times, so caching eliminates redundant Bareiss runs.
-function _solve_submodular(M::Matrix{Int}, m::Int, S_mask::UInt64,
-                            T_mask::UInt64, rhoX::Int, cache,
-                            d_buf::Vector{Tuple{Int,Int}},
-                            prev::Vector{Int},
-                            bfsq::Vector{Int})::Tuple{Bool, UInt64}
-    rk(mask) = _rank_IM_cached(cache, M, m, mask)
-
-    N = m + size(M, 2)
-    all_mask = N < 64 ? (UInt64(1) << N) - UInt64(1) : typemax(UInt64)
-    ST_mask = S_mask | T_mask
-    Z_mask = UInt64(0)
-
-    # First iteration fast path: Z=∅ means no edges exist.
-    # Iterate only over active bits (V\(S∪T)) to avoid skip-checks for all N.
-    let
-        rhoSZ = rk(S_mask)
-        rhoTZ = rk(T_mask)
-        U_mask = UInt64(0); W_mask = UInt64(0)
-        vbits = all_mask & ~ST_mask  # V \ (S∪T)
-        vb = vbits
-        while !iszero(vb)
-            vbit = vb & -vb; vb &= vb - 1  # pop lowest set bit
-            rk(S_mask | vbit) == rhoSZ + 1 && (U_mask |= vbit)
-            rk(T_mask | vbit) == rhoTZ + 1 && (W_mask |= vbit)
-        end
-        UW = U_mask & W_mask
-        if !iszero(UW)
-            Z_mask = UW & -UW  # lowest set bit of U∩W → length-1 augmenting path
-        else
-            XminusY_mask = all_mask & ~S_mask
-            rhoXminusY = iszero(XminusY_mask) ? 0 : rk(XminusY_mask)
-            return (rhoSZ + rhoXminusY <= rhoX + 2, S_mask)
-        end
-    end
-
-    while true
-        SZ_mask = S_mask | Z_mask
-        TZ_mask = T_mask | Z_mask
-        rhoSZ = rk(SZ_mask)
-        rhoTZ = rk(TZ_mask)
-
-        # Iterate only over V\(S∪T∪Z) — avoids N skip-checks per active element
-        U_mask = UInt64(0); W_mask = UInt64(0)
-        let vb = all_mask & ~ST_mask & ~Z_mask
-            while !iszero(vb)
-                vbit = vb & -vb; vb &= vb - 1
-                rk(SZ_mask | vbit) == rhoSZ + 1 && (U_mask |= vbit)
-                rk(TZ_mask | vbit) == rhoTZ + 1 && (W_mask |= vbit)
-            end
-        end
-
-        # Build digraph D: iterate over Z bits and V\(S∪T∪Z) bits directly.
-        # Edge condition: swapping u∈Z for v∈V\(S∪T∪Z) keeps rank(S∪Z) unchanged
-        # → rk(S∪(Z\{u})∪{v}) = rk(S∪Z) = rhoSZ (and analogously for T).
-        # Using rhoSZ/rhoTZ (not rhoS+|Z|) is correct even when the rank
-        # invariant rk(S∪Z)=rk(S)+|Z| fails after non-trivial augmenting paths.
-        n_de = 0
-        VnotSTZ = all_mask & ~ST_mask & ~Z_mask
-        let zb = Z_mask
-            while !iszero(zb)
-                u_lsb = zb & -zb; zb &= zb - 1  # pop lowest Z-bit
-                u = trailing_zeros(u_lsb) + 1
-                Zminu_mask = Z_mask & ~u_lsb
-                SZminu = S_mask | Zminu_mask
-                TZminu = T_mask | Zminu_mask
-                rhoSZ_target = rhoSZ
-                rhoTZ_target = rhoTZ
-                let vb = VnotSTZ
-                    while !iszero(vb)
-                        vbit = vb & -vb; vb &= vb - 1
-                        if rk(SZminu | vbit) == rhoSZ_target
-                            n_de += 1; d_buf[n_de] = (u, trailing_zeros(vbit) + 1)
-                        end
-                        if rk(TZminu | vbit) == rhoTZ_target
-                            n_de += 1; d_buf[n_de] = (trailing_zeros(vbit) + 1, u)
-                        end
-                    end
-                end
-            end
-        end
-
-        found, path_mask = _shortest_path_mask(d_buf, n_de, U_mask, W_mask, N, prev, bfsq)
-
-        if found
-            Z_mask = Z_mask ⊻ path_mask
-        else
-            reach_mask = _reachable_bitmask(d_buf, n_de, W_mask, ST_mask, N, bfsq)
-            Y_mask = S_mask | reach_mask
-
-            XminusY_mask = all_mask & ~Y_mask
-            rhoY       = iszero(reach_mask) ? rhoSZ : rk(Y_mask)
-            rhoXminusY = iszero(XminusY_mask) ? 0 : rk(XminusY_mask)
-
-            return (rhoY + rhoXminusY <= rhoX + 2, Y_mask)
-        end
-    end
-end
-
-# BFS augmenting path using bitmasks + pre-allocated prev/queue arrays.
-# Returns (found, path_mask) where path_mask is the symmetric-difference to
-# apply to Z (all vertices on the augmenting path, including endpoints).
-function _shortest_path_mask(edges::Vector{Tuple{Int,Int}}, n_edges::Int,
-                               U_mask::UInt64, W_mask::UInt64, N::Int,
-                               prev::Vector{Int}, queue::Vector{Int})::Tuple{Bool, UInt64}
-    iszero(U_mask) && return (false, UInt64(0))
-    iszero(W_mask) && return (false, UInt64(0))
-
-    # Length-0 augmenting path: element in both U and W
-    UW = U_mask & W_mask
-    if !iszero(UW)
-        v = trailing_zeros(UW) + 1
-        return (true, UInt64(1) << (v - 1))
-    end
-
-    # BFS: sources = U_mask, targets = W_mask
-    visited = U_mask
-    @inbounds for i in 1:N; prev[i] = 0; end
-    qhead = 1; qtail = 0
-    let ub = U_mask
-        while !iszero(ub)
-            bit = ub & -ub; ub &= ub - 1
-            qtail += 1; queue[qtail] = trailing_zeros(bit) + 1
-        end
-    end
-
-    while qhead <= qtail
-        v = queue[qhead]; qhead += 1
-        for ei in 1:n_edges
-            u, w = edges[ei]
-            u == v || continue
-            (visited >> (w - 1)) & 1 == 1 && continue
-            visited |= UInt64(1) << (w - 1)
-            prev[w] = v
-            if (W_mask >> (w - 1)) & 1 == 1
-                # Reconstruct path_mask (no allocation — just bitmask accumulation)
-                path_mask = UInt64(1) << (w - 1)
-                curr = w
-                while (U_mask >> (curr - 1)) & 1 == 0
-                    curr = prev[curr]
-                    path_mask |= UInt64(1) << (curr - 1)
-                end
-                return (true, path_mask)
-            end
-            qtail += 1; queue[qtail] = w
-        end
-    end
-    return (false, UInt64(0))
-end
-
-# BFS on reversed graph from W_mask; returns bitmask of reachable non-W elements.
-# queue buffer is passed in (reuse the bfsq from the caller — safe because
-# _shortest_path_mask has already returned false, so bfsq is unused).
-function _reachable_bitmask(edges::Vector{Tuple{Int,Int}}, n_edges::Int,
-                              W_mask::UInt64, ST_mask::UInt64, N::Int,
-                              queue::Vector{Int})::UInt64
-    iszero(W_mask) && return UInt64(0)
-    visited = W_mask
-    qhead = 1; qtail = 0
-    let wb = W_mask
-        while !iszero(wb)
-            bit = wb & -wb; wb &= wb - 1
-            qtail += 1; queue[qtail] = trailing_zeros(bit) + 1
-        end
-    end
-    while qhead <= qtail
-        v = queue[qhead]; qhead += 1
-        for ei in 1:n_edges
-            u, w = edges[ei]
-            w == v || continue
-            (visited >> (u - 1)) & 1 == 1 && continue
-            visited |= UInt64(1) << (u - 1)
-            qtail += 1; queue[qtail] = u
-        end
-    end
-    # Return visited \ W_mask, restricted to V \ ST_mask — a single bitmask expression.
-    visited & ~W_mask & ~ST_mask
 end
 
 # Strongly connected components of the rule digraph of _find_two_separation

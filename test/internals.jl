@@ -6,8 +6,6 @@ import TotalUnimodularity: _tu_partition, _gf2_rank_capped, _find_two_separation
                             _rank_int, _bipartite_components,
                             _is_trivial_vector,
                             _is_special_matrix, _drop_trivial_vectors,
-                            _has_dependent_rows,
-                            _has_dependent_cols, _has_dependent_vectors,
                             _drop_dependent_rows, _drop_dependent_cols,
                             _drop_dependent_vectors, _reduce,
                             _all_columns_few_nonzeros,
@@ -89,29 +87,6 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         end
         # Make sure we actually tested some cases
         @test rejections > 100
-    end
-
-    @testset "_has_dependent_rows" begin
-        @test _has_dependent_rows([1 0 1; 1 0 1; 0 1 0])
-        @test _has_dependent_rows([1 0 1; -1 0 -1; 0 1 0])
-        @test !_has_dependent_rows([1 0 1; 0 1 1; 1 1 0])
-        @test !_has_dependent_rows(F_1)
-        @test !_has_dependent_rows(F_2)
-    end
-
-    @testset "_has_dependent_cols" begin
-        @test _has_dependent_cols([1 1 0; 0 0 1; 1 1 0])
-        @test _has_dependent_cols([1 -1 0; 0 0 1; 1 -1 0])
-        @test !_has_dependent_cols([1 0 1; 0 1 1; 1 1 0])
-        @test !_has_dependent_cols(F_1)
-        @test !_has_dependent_cols(F_2)
-    end
-
-    @testset "_has_dependent_vectors" begin
-        @test _has_dependent_vectors([1 0 1; 1 0 1; 0 1 0])
-        @test _has_dependent_vectors([1 1 0; 0 0 1; 1 1 0])
-        @test !_has_dependent_vectors(F_1)
-        @test !_has_dependent_vectors(F_2)
     end
 
     @testset "_drop_dependent_rows" begin

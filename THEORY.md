@@ -269,26 +269,23 @@ Find Y ⊆ columns of [I | M] such that:
 - Y intersects both the I columns and the M columns
 - X\Y intersects both the I columns and the M columns
 
-This is solved by iterating over all S, T ⊆ X with |S| = |T| = 4 (satisfying
-the intersection conditions) and solving the submodular minimisation problem:
+Schrijver solves this by iterating over all S, T ⊆ X with |S| = |T| = 4
+(satisfying the intersection conditions) and minimising the submodular
+function ρ(Y) + ρ(X\Y) subject to S ⊆ Y ⊆ X\T. Y∩XI gives the top row
+partition and Y∩XM the left column partition, which determine A, B, C, D.
 
-    min ρ(Y) + ρ(X\Y) subject to S ⊆ Y ⊆ X\T
-
-The submodular minimisation uses a BFS-based path augmentation algorithm
-(see _solve_submodular in the source).
-
-Y∩XI gives the top row partition, Y∩XM gives the left column partition,
-which determines A, B, C, D.
-
-**Performance note:** The outer loop is O(|X|^8) where |X| = m + n.
-For a 10×15 matrix this is O(25^8) ≈ 1.5 × 10^11 — very slow.
-Performance optimisation of this step is a significant open task.
+That is polynomial but O(|X|^8) in the outer loop alone, |X| = m + n. An
+implementation of it was part of this package until October 2026 and never
+finished on a matrix larger than about 12×12, so it was removed. The
+partition is found with the two searches described above instead; for
+matrices up to 12×12 there is also an exhaustive enumeration of all
+partitions (`_decompose`), used as an independent check.
 
 ## Known Issues and Limitations
 
 1. **Performance:** the general separation search of Theorem 20.2 is
-   impractical and is not used; 2- and 3-separations are found by the
-   searches above. The 3-separation search is O((m+n)² · m · n) when there
+   impractical and is not implemented; 2- and 3-separations are found by
+   the searches above. The 3-separation search is O((m+n)² · m · n) when there
    is no separation, well above the cubic bound of Truemper's algorithm.
    See IMPLEMENTATION_NOTES.md for the routing and measurements.
 
