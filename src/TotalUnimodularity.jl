@@ -1429,6 +1429,236 @@ function _find_two_separation(M::Matrix{Int})::Union{Nothing, Tuple{Vector{Int},
     return nothing
 end
 
+# Workspace for _rule_sccs!.
+struct _SccWork
+    order::Vector{Int}
+    ends::Vector{Int}
+    index::Vector{Int}
+    low::Vector{Int}
+    pos::Vector{Int}
+    onstack::BitVector
+    stack::Vector{Int}
+    calls::Vector{Int}
+end
+_SccWork(N::Int) = _SccWork(Int[], Int[], Vector{Int}(undef, N), Vector{Int}(undef, N),
+                            Vector{Int}(undef, N), falses(N), Int[], Int[])
+
+# Strongly connected components (Tarjan's algorithm, iterative) of a digraph
+# on the rows (as i) and columns (as m + j) of an m×n matrix, in which every
+# edge joins a row to a column or a column to a row: `rowedge(r, c)` says
+# whether row r points to column c, `coledge(c, r)` whether column c points
+# to row r. Nodes with `skip[v]` set are left out. On return `w.order` holds
+# the nodes component by component, successors first, and `w.ends` the
+# position in `w.order` at which each component ends — so every prefix of
+# `w.order` that stops at a component boundary is closed under the edges.
+function _rule_sccs!(w::_SccWork, m::Int, n::Int, skip::BitVector,
+                     rowedge::F, coledge::G) where {F, G}
+    index, low, pos, onstack, stack, calls = w.index, w.low, w.pos, w.onstack, w.stack, w.calls
+    fill!(index, 0)
+    empty!(w.order); empty!(w.ends); empty!(stack); empty!(calls)
+    counter = 0
+    @inbounds for root in 1:m+n
+        (skip[root] || index[root] != 0) && continue
+        index[root] = low[root] = (counter += 1)
+        pos[root] = 0
+        push!(stack, root); onstack[root] = true
+        push!(calls, root)
+        while !isempty(calls)
+            v = calls[end]
+            descended = false
+            lim = v <= m ? n : m
+            while pos[v] < lim
+                x = (pos[v] += 1)
+                u = v <= m ? m + x : x
+                skip[u] && continue
+                (v <= m ? rowedge(v, x) : coledge(v - m, x)) || continue
+                if index[u] == 0
+                    index[u] = low[u] = (counter += 1)
+                    pos[u] = 0
+                    push!(stack, u); onstack[u] = true
+                    push!(calls, u)
+                    descended = true
+                    break
+                elseif onstack[u]
+                    low[v] = min(low[v], index[u])
+                end
+            end
+            descended && continue
+            pop!(calls)
+            if low[v] == index[v]
+                while true
+                    u = pop!(stack)
+                    onstack[u] = false
+                    push!(w.order, u)
+                    u == v && break
+                end
+                push!(w.ends, length(w.order))
+            end
+            isempty(calls) || (low[calls[end]] = min(low[calls[end]], low[v]))
+        end
+    end
+    nothing
+end
+
+# After _rule_sccs!: a set of nodes that is closed under the edges, has at
+# least `lo` and at most `hi` nodes and satisfies `accept`, as a vector, or
+# `nothing` if none is found. Prefixes of `w.order` are tried first, nearest
+# to the middle of the range first. If no prefix fits, all unions of components are
+# checked, provided there are at most 12 components: with lo = 2 and hi two
+# less than the number of nodes, as _find_three_separation calls it, a miss
+# means every prefix has 1 node or all but 1, so there are at most three.
+function _closed_set(w::_SccWork, m::Int, n::Int, skip::BitVector, lo::Int, hi::Int,
+                     rowedge::F, coledge::G, accept::H) where {F, G, H}
+    order, ends = w.order, w.ends
+    lo > hi && return nothing
+    fits = [e for e in ends if lo <= e <= hi]
+    if !isempty(fits)
+        for e in sort!(fits; by = e -> abs(2e - lo - hi))
+            set = order[1:e]
+            accept(set) && return set
+        end
+        return nothing
+    end
+
+    # No prefix fits. Unions of components that are not prefixes can still be
+    # closed (two components with no edge between them, say).
+    k = length(ends)
+    (k < 2 || k > 12) && return nothing
+    comp = zeros(Int, m + n)
+    let c = 1
+        for (pos, v) in enumerate(order)
+            pos > ends[c] && (c += 1)
+            comp[v] = c
+        end
+    end
+    sizes = [ends[c] - (c == 1 ? 0 : ends[c-1]) for c in 1:k]
+    succ = zeros(UInt, k)                # components each component points into
+    @inbounds for v in order
+        if v <= m
+            for c in 1:n
+                (skip[m + c] || !rowedge(v, c)) && continue
+                succ[comp[v]] |= UInt(1) << (comp[m + c] - 1)
+            end
+        else
+            for r in 1:m
+                (skip[r] || !coledge(v - m, r)) && continue
+                succ[comp[v]] |= UInt(1) << (comp[r] - 1)
+            end
+        end
+    end
+    for mask in UInt(1):(UInt(1) << k) - UInt(2)
+        total = 0; closed = true
+        for c in 1:k
+            (mask >> (c - 1)) & 1 == 1 || continue
+            total += sizes[c]
+            succ[c] & ~mask == 0 || (closed = false; break)
+        end
+        (closed && lo <= total <= hi) || continue
+        set = [v for v in order if (mask >> (comp[v] - 1)) & 1 == 1]
+        accept(set) && return set
+    end
+    nothing
+end
+
+"""
+    _find_three_separation(M; accept = (R1, C1) -> true)
+
+Search for a 3-separation of `M`: a split of the rows into R1 ∪ R2 and the
+columns into C1 ∪ C2, each side holding at least four rows-plus-columns, with
+
+    rank M[R1, C2] + rank M[R2, C1] = 2.
+
+Returns `(R1, C1)` as sorted index vectors, or `nothing` if there is none.
+`M` must have entries in {-1, 0, 1}, be connected and have no 2-separation
+(so the rank sum of a split with four elements on each side is never less
+than 2).
+
+With `accept`, only splits for which `accept(R1, C1)` holds are returned.
+The search then stays sound but is no longer exhaustive: for each choice of
+fixed elements only some of the closed sets are offered to `accept`.
+
+Write B = M[R1, C2] and C = M[R2, C1]. The sides can be named so that B
+contains an edge (i1, j1) of a spanning tree of the support graph, because
+some tree edge joins the two sides. Two kinds of split remain.
+
+**rank B = rank C = 1.** Fix also a nonzero (i2, j2) of C. A block with a
+nonzero entry has rank 1 iff every 2×2 minor through that entry vanishes, so
+
+  * a row r on side 1 pulls in every column c whose minor with (i1, j1) is
+    nonzero (keeps rank B = 1);
+  * a column c on side 1 pulls in every row r whose minor with (i2, j2) is
+    nonzero (keeps rank C = 1).
+
+**rank B = 2, C = 0.** Fix also (i2, j2) with rows i1, i2 and columns j1, j2
+forming a nonsingular 2×2 block of B; one exists for every nonzero (i1, j1)
+of a rank-2 block. A block containing a nonsingular 2×2 block has rank 2 iff
+every 3×3 minor containing it vanishes, so
+
+  * a row r on side 1 pulls in every column c whose 3×3 minor with the block
+    is nonzero (keeps rank B = 2);
+  * a column c on side 1 pulls in every row where it is nonzero (keeps C = 0).
+
+Either way the rules have a single premise each and form a digraph on the
+rows and columns other than the four fixed ones; the rules never involve a
+fixed row or column. The admissible sides are the two fixed elements of side
+1 together with a set that is closed under the edges, holding at least 2 and
+at most m + n - 6 nodes.
+
+This version tries every candidate for (i2, j2), which makes it
+O((m + n) · (m·n)²) in the worst case.
+"""
+function _find_three_separation(M::Matrix{Int}; accept::A = (R1, C1) -> true
+                                )::Union{Nothing, Tuple{Vector{Int}, Vector{Int}}} where {A}
+    m, n = size(M)
+    (m + n < 8 || m < 2 || n < 2) && return nothing
+    N = m + n
+    w = _SccWork(N)
+    skip = falses(N)
+    hi = N - 6                               # nodes: N - 4; at least 2 stay out
+    rows_of(set) = [v for v in set if v <= m]
+    cols_of(set) = [v - m for v in set if v > m]
+
+    for (i1, j1) in _two_separation_pivots(M)
+        p = M[i1, j1]
+
+        # rank B = rank C = 1: (i2, j2) a nonzero of C, i2 on side 2, j2 on side 1.
+        for j2 in 1:n, i2 in 1:m
+            (i2 == i1 || j2 == j1) && continue
+            q = M[i2, j2]
+            q == 0 && continue
+            fill!(skip, false)
+            skip[i1] = skip[i2] = skip[m + j1] = skip[m + j2] = true
+            rowedge = (r, c) -> p * M[r, c] != M[r, j1] * M[i1, c]
+            coledge = (c, r) -> q * M[r, c] != M[r, j2] * M[i2, c]
+            _rule_sccs!(w, m, n, skip, rowedge, coledge)
+            side = set -> (sort!([i1; rows_of(set)]), sort!([j2; cols_of(set)]))
+            set = _closed_set(w, m, n, skip, 2, hi, rowedge, coledge, set -> accept(side(set)...))
+            set !== nothing && return side(set)
+        end
+
+        # rank B = 2, C = 0: rows i1, i2 on side 1, columns j1, j2 on side 2.
+        for j2 in 1:n, i2 in 1:m
+            (i2 == i1 || j2 == j1) && continue
+            x11, x12, x21, x22 = p, M[i1, j2], M[i2, j1], M[i2, j2]
+            d = x11 * x22 - x12 * x21
+            d == 0 && continue
+            fill!(skip, false)
+            skip[i1] = skip[i2] = skip[m + j1] = skip[m + j2] = true
+            # 3×3 minor on rows i1, i2, r and columns j1, j2, c, expanded
+            # along the last row and column.
+            rowedge = (r, c) -> M[r, c] * d !=
+                M[r, j1] * (x22 * M[i1, c] - x12 * M[i2, c]) +
+                M[r, j2] * (x11 * M[i2, c] - x21 * M[i1, c])
+            coledge = (c, r) -> M[r, c] != 0
+            _rule_sccs!(w, m, n, skip, rowedge, coledge)
+            side = set -> (sort!([i1; i2; rows_of(set)]), sort!(cols_of(set)))
+            set = _closed_set(w, m, n, skip, 2, hi, rowedge, coledge, set -> accept(side(set)...))
+            set !== nothing && return side(set)
+        end
+    end
+    return nothing
+end
+
 """
     _extract_rank1(B)
 

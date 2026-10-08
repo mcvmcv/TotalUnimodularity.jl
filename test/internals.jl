@@ -2,6 +2,7 @@ using Random
 using Graphs
 
 import TotalUnimodularity: _tu_partition, _gf2_rank_capped, _find_two_separation,
+                            _find_three_separation,
                             _rank_int, _bipartite_components,
                             _is_trivial_vector,
                             _is_special_matrix, _drop_trivial_vectors,
@@ -509,6 +510,73 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         end
         R1, C1 = _find_two_separation(long)
         @test sum(size(long)) ÷ 4 <= length(R1) + length(C1) <= 3 * sum(size(long)) ÷ 4
+    end
+
+    @testset "_find_three_separation" begin
+        # Brute force: is there any split of rows ∪ columns into two sides of
+        # at least four elements each with rank(B) + rank(C) ≤ 2?
+        function has_three_separation(M)
+            m, n = size(M)
+            for mask in 1:(1 << (m + n)) - 2
+                4 <= count_ones(mask) <= m + n - 4 || continue
+                R1 = [i for i in 1:m if (mask >> (i - 1)) & 1 == 1]
+                C1 = [j for j in 1:n if (mask >> (m + j - 1)) & 1 == 1]
+                R2 = setdiff(1:m, R1)
+                C2 = setdiff(1:n, C1)
+                _rank_int(M[R1, C2]) + _rank_int(M[R2, C1]) <= 2 && return true
+            end
+            false
+        end
+
+        rng = MersenneTwister(77)
+        scramble(M) = M[randperm(rng, size(M, 1)), randperm(rng, size(M, 2))] .*
+                      rand(rng, (-1, 1), size(M, 1)) .* rand(rng, (-1, 1), 1, size(M, 2))
+        block(r, c) = rand(rng, (-1, -1, 0, 1, 1), r, c)
+        n_found = 0
+        n_none = 0
+        for trial in 1:3000
+            a, b, c, d = rand(rng, 2:3, 4)
+            kind = trial % 3
+            M = if kind == 0        # dense random: usually no 3-separation
+                p = 0.3 + 0.6rand(rng)
+                [rand(rng) < p ? rand(rng, (-1, 1)) : 0
+                 for _ in 1:rand(rng, 3:6), _ in 1:rand(rng, 3:6)]
+            elseif kind == 1        # planted rank(B) = rank(C) = 1
+                scramble([block(a, b)  rand(rng, -1:1, a) * rand(rng, -1:1, d)'
+                          rand(rng, -1:1, c) * rand(rng, -1:1, b)'  block(c, d)])
+            else                    # planted rank(B) = 2, C = 0, or its transpose
+                B = sign.(rand(rng, -1:1, a, 2) * rand(rng, -1:1, 2, d))
+                X = scramble([block(a, b) B; zeros(Int, c, b) block(c, d)])
+                isodd(trial) ? X : Matrix{Int}(X')
+            end
+            # The search is specified for reduced, connected matrices with no
+            # 2-separation.
+            _, M = _reduce(M)
+            (size(M, 1) < 2 || size(M, 2) < 2) && continue
+            _bipartite_components(M) === nothing || continue
+            _find_two_separation(M) === nothing || continue
+
+            sep = _find_three_separation(M)
+            if sep === nothing
+                n_none += 1
+                @test !has_three_separation(M)
+            else
+                n_found += 1
+                R1, C1 = sep
+                R2 = setdiff(1:size(M, 1), R1)
+                C2 = setdiff(1:size(M, 2), C1)
+                @test _rank_int(M[R1, C2]) + _rank_int(M[R2, C1]) == 2
+                @test length(R1) + length(C1) >= 4
+                @test length(R2) + length(C2) >= 4
+            end
+        end
+        # Both outcomes must be well represented.
+        @test n_found > 200
+        @test n_none > 200
+
+        @test _find_three_separation(F_1) === nothing
+        @test _find_three_separation(F_2) === nothing
+        @test _find_three_separation(zeros(Int, 1, 1)) === nothing
     end
 
     @testset "_find_epsilon" begin
