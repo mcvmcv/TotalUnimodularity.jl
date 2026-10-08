@@ -47,6 +47,9 @@ applying Case 4, and return `false` if degenerate.
 This is a defensive fix — it may give false negatives for some TU matrices,
 but in practice all tested matrices agree with `naive_is_totally_unimodular`.
 
+**Superseded (October 2026):** the check has been removed; see "Case 4
+accepts degenerate A and D" below.
+
 ### Cycle detection in Cases 5 and 6
 Cases 5 and 6 pivot on a nonzero entry of B (or C) and recurse. The pivot
 does not always produce a matrix that decomposes as Case 4 — instead,
@@ -64,6 +67,10 @@ which wrongly rejected identical matrices appearing in sibling branches
 A cycle says nothing about total unimodularity. Until October 2026 the
 guard returned `false`, which produced false negatives on TU matrices (see
 Bug 8).
+
+Cases 5/6 no longer search the pivoted matrix (see "Cases 5/6 carry the
+split through the pivot" below), which removes the source of these cycles;
+the guard stays as a safeguard.
 
 ### `_is_trivial_vector` definition
 The initial implementation checked `count(!iszero, v) == 1 && all(x -> x in (0,1), v)`,
@@ -166,8 +173,7 @@ of a few thousand inputs; see "Structured fuzz" under Testing.
 ## Known Limitations
 
 ### Performance and routing
-1-sums and 2-sums are split off in polynomial time; what remains is not
-polynomial in practice. `_is_tu_irreducible` runs, in order:
+`_is_tu_irreducible` runs, in order:
 
 1. the network, transpose-network and special-matrix tests;
 2. `_find_two_separation` (see below) — on success the block is split with
@@ -175,31 +181,84 @@ polynomial in practice. `_is_tu_irreducible` runs, in order:
 3. the Eulerian k ≤ 3 pre-filter. It is O(m³n³) in the worst case, which is
    why it runs after the split: on a splittable matrix only the pieces pay
    for it;
-4. routing of the block, which now has no 2-separation, by size:
-   - min(m,n) ≤ 24: the exact branch-and-prune Ghouila-Houri `_tu_partition`
-     test. Measured worst cases (dense TU inputs, which force full
-     exhaustion): ~0.1s at min-dim 16, ~0.5s at 18, ~3s at 20, ~13s at 22;
-     non-TU inputs usually exit in milliseconds.
-   - both dimensions > 24 and m + n ≤ 64: `_decompose` →
-     `_decompose_matroid`, O((m+n)^8). It is effectively unusable: for a
-     14×14 matrix it enumerates ~3.4×10⁸ (S,T) pairs and runs for hours. Its
-     Float64 rank routine is also only argued exact up to ~20 rows.
-   - both dimensions > 24 and m + n > 64: `_tu_partition`. Not because it is
-     feasible there, but because `_decompose_matroid` keeps element sets in
-     `UInt64` masks and cannot represent the block at all.
+4. for a block with min(m,n) ≤ 8 (`_PARTITION_MAX_DIM`), the exact
+   branch-and-prune Ghouila-Houri test `_tu_partition`. Measured on TU blocks
+   with no 2-separation, the search route below is level with it at 8 and
+   ahead beyond: 4 ms against 6 ms at 15×13, 0.7 ms against 0.6 s at 21×19;
+5. `_find_three_separation` (see below). No separation means not TU, by
+   Seymour's theorem; otherwise `_apply_decomposition` handles the split
+   (Case 4 directly, Cases 5/6 through a pivot).
+
+Until October 2026 step 5 did not exist: blocks up to min-dimension 24 went
+to `_tu_partition` (about 13 s at 22, exponential), and larger ones to the
+matroid-intersection search of Theorem 20.2, O((m+n)^8), which never
+finished on anything of that size.
 
 The exhaustive ≤12×12 bipartition search in `_decompose` is used only with
 `fast = false`, i.e. `cmr_is_totally_unimodular(M; algorithm=:decomposition)`,
-which also skips step 2 for those blocks so that Cases 2–6 stay reachable
-through the general search. The default route skips it because
-`_tu_partition` is faster at every size measured: ~4× in aggregate on
-composed inputs, and 3 ms against 2.2 s on the 12×12 CMR Eulerian test
-matrix. The decomposition code is kept correct by running every oracle and
-regression test through both routes.
+which also skips steps 2, 4 and 5 for those blocks. It is an independent
+implementation of the search, and every oracle and regression test runs
+through both routes. `_decompose_matroid` is no longer reachable from either
+route (`_decompose` only falls through to it above 12×12).
 
-Making the 3-separation search scale (Truemper/CMR-style) is the main open
-performance problem: a large block with no 2-separation that is neither a
-network matrix nor the transpose of one still has no practical route.
+`_tu_partition` remains as a fallback in three places: a matrix repeated on
+the recursion path, more than 100 nested pivots, and `_find_epsilon` finding
+no R–K path. None has fired in any test or fuzz run since the pivot change
+below; if one does on a large block, the run stalls, as the test is
+exponential.
+
+### 3-separation search (`_find_three_separation`)
+The search extends the idea of the 2-separation search. Name the sides so
+that B = M[R1, C2] contains a spanning-tree edge (i1, j1) of the support
+graph. Two kinds of split with rank(B) + rank(C) = 2 remain:
+
+- rank B = rank C = 1. Fix a nonzero (i2, j2) of C as well. A row on side 1
+  pulls in the columns whose 2×2 minor with (i1, j1) is nonzero; a column on
+  side 1 pulls in the rows whose 2×2 minor with (i2, j2) is nonzero.
+- rank B = 2, C = 0. Fix (i2, j2) so that rows i1, i2 and columns j1, j2
+  form a nonsingular block of B. A row on side 1 pulls in the columns whose
+  3×3 minor with that block is nonzero; a column on side 1 pulls in the
+  rows where it is nonzero.
+
+(rank B = 0, rank C = 2 is the second kind with the sides renamed.) The four
+fixed elements never appear in a rule, so a split is the two fixed elements
+of side 1 plus a closed set of between 2 and m+n-6 of the other nodes.
+`_rule_sccs!` computes strongly connected components, `_closed_set` picks a
+union of them in range. Usually a prefix of Tarjan's order works; when none
+does there are at most three components and all unions are tried — two
+sinks with no edge between them form a closed set that is not a prefix.
+
+Candidates for (i2, j2) are cut down with a spanning forest, as described in
+the docstring: about m+n per (i1, j1) instead of every nonzero. Rule edges
+are only evaluated on the supports of the row or column and of the fixed
+rows or columns, since they are zero elsewhere. Together these took a
+65×62 matrix with no separation from 5.0 s to 0.9 s.
+
+Correctness matters more here than for the 2-separation search, because "no
+separation" is reported as "not TU". The unit test compares against
+brute-force enumeration of all splits on small matrices, and
+`exhaustive = true` (every candidate for (i2, j2)) is kept as a second
+implementation to compare with.
+
+### Cases 5/6 carry the split through the pivot
+A pivot on a nonzero of B exchanges the roles of its row and its column. The
+same split of the matroid's elements, with the pivot row now on side 2 and
+the pivot column on side 1, is a split of the pivoted matrix with rank(B) =
+rank(C) = 1, so Case 4 applies to it at once (`_apply_pivoted`). The earlier
+code reduced the pivoted matrix and searched it again; that search could
+return another rank-2 split and pivot straight back, which is where the
+pivot cycles of Bug 8 came from.
+
+### Case 4 accepts degenerate A and D
+Case 4 used to reject a split whose A or D had a row or column with at most
+one nonzero, or a duplicate pair, and search for another split (see Bug 3).
+Schrijver's construction needs M to be reduced, connected and free of
+2-separations, not A and D. Bug 3 dates from before 2-separations were
+split off first, when the matrix reaching Case 4 could still have one. On
+larger matrices there is usually no split that passes the old test — none
+on the K_n ⊕₃ K_m* family at any size — so the rejection was removed. The
+`reject_degenerate_3sum` keyword of `_decompose` is no longer passed by any
+caller.
 
 ### 2-separation search (`_find_two_separation`)
 A 2-separation of a connected matrix is a split with one cross block zero
@@ -324,13 +383,6 @@ Further acceleration opportunities:
 - Pruning the outer S,T loop using matroid intersection theory
 - Caching rank computations for repeated column subsets
 
-### Case 4 degeneracy handling
-When the first rank(B) = rank(C) = 1 partition has a degenerate A or D,
-`_decompose` is retried with `reject_degenerate_3sum = true`. If no
-non-degenerate partition exists, or `_find_epsilon` finds no R–K path, the
-matrix is decided with `_tu_partition`. No fuzz input has reached either
-fallback from a non-degenerate start, so they are untested.
-
 ## Testing
 
 ### Oracle
@@ -354,6 +406,15 @@ over several seeds × ~8000 inputs. The generator caps matrices at 12×12, so
 the `:decomposition` route never calls `_find_two_separation` on them; the
 default route does. Raising the cap (18×18 was used when the 2-sum split
 went in) exercises it on both.
+
+For the 3-separation route there are two more generators, both built from
+the K_n ⊕₃ K_m* family (3-sum of the network matrix of K_n with the
+transpose of the network matrix of K_m plus a vertex of degree 3) by random
+pivots, row and column deletions and entry flips. Small members are checked
+against `_tu_partition` with `_PARTITION_MAX_DIM[] = 0`, which forces the
+search route at every size (1500 inputs in the suite). Members from 21×19
+to 66×64 can only be checked against the CMR binary; that run is not in the
+suite.
 
 ### Known test matrices
 - `F_1`, `F_2`: TU, non-network, non-decomposable

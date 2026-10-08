@@ -206,6 +206,95 @@ include("test_cmr.jl")
         end
     end
 
+    # Blocks with no 2-separation that are neither network matrices nor
+    # transposes of one are decided through a 3-separation. The family used
+    # here is the 3-sum of the network matrix of K_n with the transpose of
+    # the network matrix of K_m plus a vertex of degree 3; from 28×26 on it
+    # is out of reach of the exponential test.
+    @testset "3-separation route" begin
+        # Network matrix of K_n (star tree at vertex 1, rows = arcs (1,v))
+        # plus a parallel copy of arc (1,2), arranged as [Am a a; cᵀ 0 1].
+        function A_Kn(n)
+            cols = Vector{Int}[]
+            for u in 2:n, v in u+1:n
+                (u, v) == (2, n) && continue
+                x = zeros(Int, n - 1); x[u-1] = 1; x[v-1] = -1; push!(cols, x)
+            end
+            x = zeros(Int, n - 1); x[1] = -1; push!(cols, x)
+            y = copy(x); y[n-1] = 1; push!(cols, y)
+            reduce(hcat, cols)
+        end
+        # Transpose of the network matrix of K_m plus a vertex w joined to
+        # 1, 2, 3 (tree: 1→w, w→2, 1→v for v ≥ 3), as [1 0 bᵀ; d d Bm].
+        function B_Km(m)
+            cols = Vector{Int}[]
+            x = zeros(Int, m); x[1] = 1; x[3] = -1; push!(cols, x)
+            x = zeros(Int, m); x[1] = 1; x[2] = 1; push!(cols, x)
+            for v in 3:m; x = zeros(Int, m); x[1] = 1; x[2] = 1; x[v] = -1; push!(cols, x); end
+            for u in 3:m, v in u+1:m; x = zeros(Int, m); x[u] = -1; x[v] = 1; push!(cols, x); end
+            Matrix{Int}(reduce(hcat, cols)')
+        end
+        rng = MersenneTwister(7)
+        scramble(M) = M[randperm(rng, size(M, 1)), randperm(rng, size(M, 2))] .*
+                      rand(rng, (-1, 1), size(M, 1)) .* rand(rng, (-1, 1), 1, size(M, 2))
+        function rand_pivot(M)
+            p = rand(rng, findall(!iszero, M))
+            pivot(M[[p[1]; setdiff(1:size(M, 1), p[1])],
+                    [p[2]; setdiff(1:size(M, 2), p[2])]], 1)
+        end
+
+        for (n, m) in ((5, 5), (6, 6), (7, 7), (8, 8), (9, 9), (12, 12))
+            M = scramble(three_sum(A_Kn(n), B_Km(m)))
+            @test is_totally_unimodular(M)
+            @test is_totally_unimodular(Matrix{Int}(M'))
+            # Pivoting keeps a TU matrix TU and changes which kind of
+            # 3-separation the matrix shows.
+            P = M
+            for _ in 1:4; P = rand_pivot(P); end
+            @test is_totally_unimodular(P)
+            # A non-TU 3×3 placed inside Bm survives the 3-sum as a submatrix.
+            Bbad = B_Km(m)
+            Bbad[2:4, 3:5] = [1 1 0; 1 0 1; 0 1 1]
+            @test !is_totally_unimodular(scramble(three_sum(A_Kn(n), Bbad)))
+        end
+
+        # Against the exact test, with the search route forced on at every
+        # size: pivots, deletions and entry flips of the small members.
+        base = [scramble(three_sum(A_Kn(n), B_Km(m))) for (n, m) in ((5, 5), (6, 5), (6, 6))]
+        old = TotalUnimodularity._PARTITION_MAX_DIM[]
+        TotalUnimodularity._PARTITION_MAX_DIM[] = 0
+        n_bad = 0
+        n_tu = 0
+        n_total = 1500
+        try
+            for trial in 1:n_total
+                M = rand(rng, base)
+                for _ in 1:rand(rng, 0:6); M = rand_pivot(M); end
+                for _ in 1:rand(rng, 0:3)
+                    size(M, 1) > 5 && rand(rng, Bool) &&
+                        (M = M[setdiff(1:size(M, 1), rand(rng, 1:size(M, 1))), :])
+                    size(M, 2) > 5 && rand(rng, Bool) &&
+                        (M = M[:, setdiff(1:size(M, 2), rand(rng, 1:size(M, 2)))])
+                end
+                M = scramble(M)
+                if rand(rng) < 0.4
+                    k = rand(rng, 1:length(M))
+                    M[k] = rand(rng, setdiff(-1:1, M[k]))
+                end
+                want = TotalUnimodularity._tu_partition(M)
+                n_tu += want
+                if is_totally_unimodular(M) != want
+                    n_bad += 1
+                    @warn "DISAGREEMENT" trial M want
+                end
+            end
+        finally
+            TotalUnimodularity._PARTITION_MAX_DIM[] = old
+        end
+        @test n_bad == 0
+        @test n_total ÷ 4 < n_tu < 3 * n_total ÷ 4
+    end
+
     # An exception inside is_totally_unimodular fails these tests: it is a
     # predicate and must return an answer for every {-1,0,1} matrix.
     @testset "is_totally_unimodular vs naive (random, extended)" begin

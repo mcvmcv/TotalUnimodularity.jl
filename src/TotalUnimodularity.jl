@@ -1451,8 +1451,16 @@ _SccWork(N::Int) = _SccWork(Int[], Int[], Vector{Int}(undef, N), Vector{Int}(und
 # the nodes component by component, successors first, and `w.ends` the
 # position in `w.order` at which each component ends — so every prefix of
 # `w.order` that stops at a component boundary is closed under the edges.
+#
+# The predicates are only evaluated where an edge is possible: row r can only
+# point to the columns in `row_sup[r]` and in `extra_cols`, column c only to
+# the rows in `col_sup[c]` and in `extra_rows`. For the rules used here that
+# is the support of the row or column plus the supports of the fixed rows or
+# columns, which keeps one pass near O(nnz) on sparse matrices.
 function _rule_sccs!(w::_SccWork, m::Int, n::Int, skip::BitVector,
-                     rowedge::F, coledge::G) where {F, G}
+                     rowedge::F, coledge::G,
+                     row_sup::Vector{Vector{Int}}, extra_cols::Vector{Int},
+                     col_sup::Vector{Vector{Int}}, extra_rows::Vector{Int}) where {F, G}
     index, low, pos, onstack, stack, calls = w.index, w.low, w.pos, w.onstack, w.stack, w.calls
     fill!(index, 0)
     empty!(w.order); empty!(w.ends); empty!(stack); empty!(calls)
@@ -1466,9 +1474,12 @@ function _rule_sccs!(w::_SccWork, m::Int, n::Int, skip::BitVector,
         while !isempty(calls)
             v = calls[end]
             descended = false
-            lim = v <= m ? n : m
+            own = v <= m ? row_sup[v] : col_sup[v - m]
+            extra = v <= m ? extra_cols : extra_rows
+            lim = length(own) + length(extra)
             while pos[v] < lim
-                x = (pos[v] += 1)
+                k = (pos[v] += 1)
+                x = k <= length(own) ? own[k] : extra[k - length(own)]
                 u = v <= m ? m + x : x
                 skip[u] && continue
                 (v <= m ? rowedge(v, x) : coledge(v - m, x)) || continue
@@ -1560,6 +1571,45 @@ function _closed_set(w::_SccWork, m::Int, n::Int, skip::BitVector, lo::Int, hi::
     nothing
 end
 
+# Spanning forest of the bipartite graph on the rows other than `i0` and the
+# columns other than `j0` of an m×n matrix whose edges are the pairs (r, c)
+# with `edge(r, c)`. Returns the forest edges and the component number of
+# every row and column (0 for i0 and j0).
+function _rule_forest(m::Int, n::Int, i0::Int, j0::Int, edge::F) where {F}
+    forest = Tuple{Int,Int}[]
+    rcomp = zeros(Int, m)
+    ccomp = zeros(Int, n)
+    queue = Int[]                        # rows as i, columns as m + j
+    k = 0
+    @inbounds for start in 1:m+n
+        if start <= m
+            (start == i0 || rcomp[start] != 0) && continue
+            rcomp[start] = (k += 1)
+        else
+            (start - m == j0 || ccomp[start - m] != 0) && continue
+            ccomp[start - m] = (k += 1)
+        end
+        empty!(queue); push!(queue, start)
+        head = 0
+        while head < length(queue)
+            v = queue[head += 1]
+            if v <= m
+                for c in 1:n
+                    (c == j0 || ccomp[c] != 0 || !edge(v, c)) && continue
+                    ccomp[c] = k; push!(queue, m + c); push!(forest, (v, c))
+                end
+            else
+                c = v - m
+                for r in 1:m
+                    (r == i0 || rcomp[r] != 0 || !edge(r, c)) && continue
+                    rcomp[r] = k; push!(queue, r); push!(forest, (r, c))
+                end
+            end
+        end
+    end
+    forest, rcomp, ccomp
+end
+
 """
     _find_three_separation(M; accept = (R1, C1) -> true)
 
@@ -1604,16 +1654,31 @@ fixed row or column. The admissible sides are the two fixed elements of side
 1 together with a set that is closed under the edges, holding at least 2 and
 at most m + n - 6 nodes.
 
-This version tries every candidate for (i2, j2), which makes it
-O((m + n) · (m·n)²) in the worst case.
+Not every (i2, j2) has to be tried. Take the graph on the rows other than i1
+and the columns other than j1 whose edges are the nonzeros of M that cannot
+lie in B (first kind: B is rank 1 through (i1, j1), so its nonzeros (r, c)
+have M[r, j1] ≠ 0, M[i1, c] ≠ 0 and a vanishing minor), or the nonzeros of M
+that stay nonzero in the Schur complement of (i1, j1) (second kind: these
+cannot lie in C, which is zero). An edge of this graph that joins the two
+sides is then a valid (i2, j2), and if one does, so does an edge of any
+spanning forest. Otherwise every component lies on one side, and (i2, j2)
+is one of the remaining candidates that join two components — few, as they
+all sit in rows that are nonzero in column j1 and columns that are nonzero
+in row i1. That leaves about m + n candidates per (i1, j1) and
+O((m + n)² · m · n) work in all, where trying every candidate
+(`exhaustive = true`, kept for cross-checking) is O((m + n) · (m·n)²).
 """
-function _find_three_separation(M::Matrix{Int}; accept::A = (R1, C1) -> true
+function _find_three_separation(M::Matrix{Int}; accept::A = (R1, C1) -> true,
+                                exhaustive::Bool = false
                                 )::Union{Nothing, Tuple{Vector{Int}, Vector{Int}}} where {A}
     m, n = size(M)
     (m + n < 8 || m < 2 || n < 2) && return nothing
     N = m + n
     w = _SccWork(N)
     skip = falses(N)
+    row_sup = [findall(!iszero, @view M[r, :]) for r in 1:m]
+    col_sup = [findall(!iszero, @view M[:, c]) for c in 1:n]
+    no_extra = Int[]
     hi = N - 6                               # nodes: N - 4; at least 2 stay out
     rows_of(set) = [v for v in set if v <= m]
     cols_of(set) = [v - m for v in set if v > m]
@@ -1622,35 +1687,55 @@ function _find_three_separation(M::Matrix{Int}; accept::A = (R1, C1) -> true
         p = M[i1, j1]
 
         # rank B = rank C = 1: (i2, j2) a nonzero of C, i2 on side 2, j2 on side 1.
-        for j2 in 1:n, i2 in 1:m
-            (i2 == i1 || j2 == j1) && continue
+        seeds = if exhaustive
+            [(i, j) for j in 1:n for i in 1:m if i != i1 && j != j1 && M[i, j] != 0]
+        else
+            in_B = (r, c) -> M[r, j1] != 0 && M[i1, c] != 0 && p * M[r, c] == M[r, j1] * M[i1, c]
+            forest, rcomp, ccomp = _rule_forest(m, n, i1, j1, (r, c) -> M[r, c] != 0 && !in_B(r, c))
+            for c in 1:n, r in 1:m
+                (r == i1 || c == j1 || M[r, c] == 0 || rcomp[r] == ccomp[c]) && continue
+                in_B(r, c) && push!(forest, (r, c))
+            end
+            forest
+        end
+        for (i2, j2) in seeds
             q = M[i2, j2]
-            q == 0 && continue
             fill!(skip, false)
             skip[i1] = skip[i2] = skip[m + j1] = skip[m + j2] = true
-            rowedge = (r, c) -> p * M[r, c] != M[r, j1] * M[i1, c]
-            coledge = (c, r) -> q * M[r, c] != M[r, j2] * M[i2, c]
-            _rule_sccs!(w, m, n, skip, rowedge, coledge)
+            rowedge = (r, c) -> @inbounds p * M[r, c] != M[r, j1] * M[i1, c]
+            coledge = (c, r) -> @inbounds q * M[r, c] != M[r, j2] * M[i2, c]
+            _rule_sccs!(w, m, n, skip, rowedge, coledge,
+                        row_sup, row_sup[i1], col_sup, col_sup[j2])
             side = set -> (sort!([i1; rows_of(set)]), sort!([j2; cols_of(set)]))
             set = _closed_set(w, m, n, skip, 2, hi, rowedge, coledge, set -> accept(side(set)...))
             set !== nothing && return side(set)
         end
 
         # rank B = 2, C = 0: rows i1, i2 on side 1, columns j1, j2 on side 2.
-        for j2 in 1:n, i2 in 1:m
-            (i2 == i1 || j2 == j1) && continue
+        schur = (r, c) -> p * M[r, c] - M[r, j1] * M[i1, c]
+        seeds = if exhaustive
+            [(i, j) for j in 1:n for i in 1:m if i != i1 && j != j1 && schur(i, j) != 0]
+        else
+            forest, rcomp, ccomp = _rule_forest(m, n, i1, j1, (r, c) -> M[r, c] != 0 && schur(r, c) != 0)
+            for c in 1:n, r in 1:m
+                (r == i1 || c == j1 || M[r, c] != 0 || rcomp[r] == ccomp[c]) && continue
+                schur(r, c) != 0 && push!(forest, (r, c))
+            end
+            forest
+        end
+        for (i2, j2) in seeds
             x11, x12, x21, x22 = p, M[i1, j2], M[i2, j1], M[i2, j2]
             d = x11 * x22 - x12 * x21
-            d == 0 && continue
             fill!(skip, false)
             skip[i1] = skip[i2] = skip[m + j1] = skip[m + j2] = true
             # 3×3 minor on rows i1, i2, r and columns j1, j2, c, expanded
             # along the last row and column.
-            rowedge = (r, c) -> M[r, c] * d !=
+            rowedge = (r, c) -> @inbounds M[r, c] * d !=
                 M[r, j1] * (x22 * M[i1, c] - x12 * M[i2, c]) +
                 M[r, j2] * (x11 * M[i2, c] - x21 * M[i1, c])
-            coledge = (c, r) -> M[r, c] != 0
-            _rule_sccs!(w, m, n, skip, rowedge, coledge)
+            coledge = (c, r) -> @inbounds M[r, c] != 0
+            _rule_sccs!(w, m, n, skip, rowedge, coledge,
+                        row_sup, vcat(row_sup[i1], row_sup[i2]), col_sup, no_extra)
             side = set -> (sort!([i1; i2; rows_of(set)]), sort!(cols_of(set)))
             set = _closed_set(w, m, n, skip, 2, hi, rowedge, coledge, set -> accept(side(set)...))
             set !== nothing && return side(set)
@@ -1936,13 +2021,12 @@ After reduction and splitting into connected blocks, each block is tested for
 being a network matrix, the transpose of one, or one of the special matrices
 [`F_1`](@ref), [`F_2`](@ref) (Schrijver, *Theory of Linear and Integer
 Programming*, Theorems 20.1 and 20.3). Blocks that are none of these are
-split along 2-separations (2-sums), found in polynomial time, for as long as
-one exists. A block with no 2-separation is decided by an exact
-branch-and-prune Ghouila-Houri test, which is exponential in the block's
-smaller dimension and practical up to about 22; only blocks with both
-dimensions above 24 and at most 64 rows plus columns go to the Seymour
-decomposition search instead. To run the decomposition on small matrices as
-well, use `cmr_is_totally_unimodular(M; algorithm = :decomposition)`.
+split along a 2-separation (2-sum) or, if there is none, a 3-separation
+(3-sum), both found in polynomial time, and the pieces are tested in the same
+way; a block with neither is not TU. Blocks whose smaller dimension is at
+most 8 are decided by an exact branch-and-prune Ghouila-Houri test instead.
+`cmr_is_totally_unimodular(M; algorithm = :decomposition)` runs an
+independent, exhaustive separation search on blocks up to 12×12.
 
 Any `AbstractMatrix` with integer-valued entries is accepted; entries outside
 {-1, 0, 1} make the matrix trivially non-TU, so `false` is returned.
@@ -2013,6 +2097,14 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, fa
     return result
 end
 
+# Blocks whose smaller dimension is at most this are decided by the exact
+# Ghouila-Houri test instead of being searched for a 3-separation. Measured
+# on TU blocks with no 2-separation, the search route is level at 8 and
+# ahead beyond (4 ms against 6 ms at 15×13, 0.7 ms against 0.6 s at 21×19).
+# A Ref so that tests can set it to 0 and compare the search route with the
+# exact test on small matrices.
+const _PARTITION_MAX_DIM = Ref(8)
+
 # TU test for a matrix that is already reduced, connected, and not on the
 # current recursion path.
 function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, fast::Bool)::Bool
@@ -2046,27 +2138,28 @@ function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, 
     _tu_eulerian(M, 3) || return false
 
     if !legacy
+        # Small blocks: the exact branch-and-prune Ghouila-Houri test is
+        # exponential in the smaller dimension but faster than searching
+        # for a separation at these sizes.
+        min(m, n) <= _PARTITION_MAX_DIM[] && return _tu_partition(M)
 
-        # When the smaller dimension is modest, the exact branch-and-prune
-        # Ghouila-Houri test is the fastest route: measured worst cases (dense
-        # TU matrices, which force exhaustion) are ~0.5s at min-dim 18, ~3s at
-        # 20, ~13s at 22; non-TU inputs usually exit in milliseconds. It also
-        # beats the exhaustive ≤12×12 bipartition search (~4x in aggregate on
-        # composed inputs, seconds vs milliseconds in the worst case).
-        # Beyond the cap only the matroid-intersection search remains, which
-        # enumerates ~C(m+n,4)² (S,T) pairs — hours for a 14×14 matrix — and
-        # whose UInt64 element masks cannot represent more than 64 rows plus
-        # columns at all. See IMPLEMENTATION_NOTES.md.
-        (min(m, n) <= 24 || m + n > 64) && return _tu_partition(M)
+        # M is reduced, connected, has no 2-separation and is neither a
+        # network matrix, the transpose of one, nor F_1/F_2. By Seymour's
+        # theorem it is then TU only if it has a 3-separation, and
+        # _find_three_separation is exhaustive.
+        sep = _find_three_separation(M)
+        sep === nothing && return false
+        R1, C1 = sep
+        R2 = setdiff(1:m, R1)
+        C2 = setdiff(1:n, C1)
+        A, B, C, D = M[R1, C1], M[R1, C2], M[R2, C1], M[R2, C2]
+        return _apply_decomposition(M, A, B, C, D, _rank_int(B), _rank_int(C),
+                                    depth, seen, fast)
     end
 
+    # Exhaustive search, ≤12×12 only: no separation means not TU.
     found, (A, B, C, D) = _decompose(M)
-    if !found
-        # The ≤12×12 bipartition search is exhaustive, so by Seymour's theorem
-        # no separation means not TU. The matroid search may miss separations,
-        # so its failure proves nothing — decide exactly instead.
-        return (m <= 12 && n <= 12) ? false : _tu_partition(M)
-    end
+    found || return false
 
     rB = _rank_int(B)
     rC = _rank_int(C)
@@ -2438,8 +2531,8 @@ algorithms from the CMR library (`src/cmr/tu.c`, `CMRtuTest`):
 
 **`:decomposition`** runs the Seymour decomposition of Theorem 20.3, with its
 exhaustive separation search, on blocks up to 12×12 (where
-[`is_totally_unimodular`](@ref) would use the 2-sum split and the faster
-Ghouila-Houri test); larger blocks are handled as in `is_totally_unimodular`.
+[`is_totally_unimodular`](@ref) uses its polynomial separation searches);
+larger blocks are handled as in `is_totally_unimodular`.
 
 **`:eulerian`** — M is TU iff every square Eulerian submatrix (each row and column
 within it has an even number of nonzeros) has total entry sum ≡ 0 (mod 4).

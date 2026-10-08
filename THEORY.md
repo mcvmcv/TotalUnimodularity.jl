@@ -183,18 +183,23 @@ nCR = |C_rows|, nBK = |B_cols|, nnotCR = |notC_rows|, nnotBK = |notB_cols|.
 
 **Case 5:** rank(B) = 2, rank(C) = 0
 Pivot on a nonzero entry of B to reduce to Case 4.
-Find first nonzero B[i,j] = η. Permute M so this entry is at position (1,1),
-pivot on the leading 1×1 submatrix, reduce, and recurse.
+Find first nonzero B[i,j] = η. Permute M so this entry is at position (1,1)
+and pivot on the leading 1×1 submatrix. With the pivot row moved to the
+bottom part and the pivot column to the left part, the pivoted matrix has a
+partition with rank(B) = rank(C) = 1, and Case 4 is applied to it.
 
 **Case 6:** rank(B) = 0, rank(C) = 2
 Symmetric to Case 5, pivot on a nonzero entry of C.
 
 ### Cycle Detection
-Cases 5 and 6 can cycle (the pivot may produce a matrix that decomposes
-again as Case 5/6, leading to an infinite loop). The matrices on the current
-recursion path are recorded; if one is encountered again, the decomposition
-has made no progress and the matrix is decided with the exact Ghouila-Houri
-test instead. A cycle says nothing about total unimodularity.
+If the pivoted matrix of Cases 5 and 6 is searched for a decomposition
+afresh, the search can return another Case 5/6 partition and pivot straight
+back. The implementation avoids this by carrying the partition through the
+pivot (see "3-separations in polynomial time" below), so the pivoted matrix
+goes to Case 4 directly. As a safeguard the matrices on the current
+recursion path are still recorded; if one is encountered again it is decided
+with the exact Ghouila-Houri test. A cycle says nothing about total
+unimodularity.
 
 ### 2-separations in polynomial time
 Cases 2 and 3 (rank(B) + rank(C) = 1) do not need the general search of
@@ -220,6 +225,41 @@ It is enough to try the edges of a spanning tree of the support graph of M
 (rows and columns as vertices, nonzero entries as edges): the tree connects
 the two sides of the separation, so one of its edges crosses, and since
 C = 0 that edge is a nonzero of B.
+
+### 3-separations in polynomial time
+The same idea finds the partitions of Cases 4–6 (rank(B) + rank(C) = 2, at
+least four rows-plus-columns on each side) when M is connected and has no
+2-separation. Name the sides so that B contains an edge (i1, j1) of a
+spanning tree of the support graph.
+
+*rank(B) = rank(C) = 1.* Fix a nonzero (i2, j2) of C. With p = M[i1,j1] and
+q = M[i2,j2]:
+
+- a row r in the top part forces every column c with
+  p·M[r,c] ≠ M[r,j1]·M[i1,c] into the left part (rank(B) = 1);
+- a column c in the left part forces every row r with
+  q·M[r,c] ≠ M[r,j2]·M[i2,c] into the top part (rank(C) = 1).
+
+*rank(B) = 2, C = 0.* Fix (i2, j2) so that rows i1, i2 and columns j1, j2
+form a nonsingular 2×2 block X of B; for a rank-2 block and any nonzero
+(i1, j1) of it one exists.
+
+- a row r in the top part forces every column c for which the 3×3 minor on
+  rows {i1, i2, r} and columns {j1, j2, c} is nonzero into the left part (a
+  matrix containing a nonsingular 2×2 block has rank 2 iff every 3×3 minor
+  containing the block vanishes);
+- a column c in the left part forces every row where it is nonzero into the
+  top part (C = 0).
+
+In both cases the four fixed rows and columns never occur in a rule (the
+minors vanish identically for them), so the admissible top-left parts are
+the fixed elements of that side together with a set of the remaining rows
+and columns that is closed under the rules and leaves at least two of them
+out and takes at least two in.
+
+After a pivot on (i1, j1) in the second case, the partition with row i1
+moved to the bottom and column j1 moved to the left is of the first kind,
+which is how Cases 5 and 6 are reduced to Case 4.
 
 ## Seymour Decomposition Test (Theorem 20.2)
 
@@ -247,18 +287,15 @@ Performance optimisation of this step is a significant open task.
 ## Known Issues and Limitations
 
 1. **Performance:** the general separation search of Theorem 20.2 is
-   exhaustive and impractical beyond about 12×12, so the default route does
-   not use it: 2-separations are found by the polynomial search above, and a
-   block without one is decided by the exact (exponential) Ghouila-Houri
-   test. A polynomial search for 3-separations is the missing piece. See
-   IMPLEMENTATION_NOTES.md for the routing and measured limits.
+   impractical and is not used; 2- and 3-separations are found by the
+   searches above. The 3-separation search is O((m+n)² · m · n) when there
+   is no separation, well above the cubic bound of Truemper's algorithm.
+   See IMPLEMENTATION_NOTES.md for the routing and measurements.
 
-2. **Cycle detection:** a pivot cycle in Cases 5 and 6 is resolved with the
-   Ghouila-Houri test (see above), so it costs time but not correctness.
-
-3. **Case 4 degeneracy:** when the decomposition produces A or D with
-   dependent/trivial rows or columns, another partition is sought; if none
-   exists the matrix is likewise decided with the Ghouila-Houri test.
+2. **Exponential fallback:** the exact Ghouila-Houri test decides blocks of
+   smaller dimension at most 8 and is the fallback when a matrix repeats on
+   the recursion path or the sign ε of a 3-sum cannot be determined. No
+   test input reaches the fallback on the current code.
 
 ## References
 

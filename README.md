@@ -5,11 +5,11 @@ matrices, following the recognition algorithm based on Seymour's
 decomposition theorem.
 See [total unimodularity](https://en.wikipedia.org/wiki/Unimodular_matrix#Total_unimodularity).
 
-> **Note:** the algorithm of Schrijver's Theorem 20.3 is polynomial-time, but
-> this implementation is not. 1-sums and 2-sums are split off in polynomial
-> time, but a block that cannot be split that way is decided by an exact
-> exponential-time test. See [Performance](#performance) for the practical
-> limits.
+> **Note:** every step on the default route is polynomial, but with a higher
+> degree than the best known algorithms, and an exact exponential-time test
+> is kept for very small blocks and as a fallback. See
+> [Performance](#performance) for measured limits and a comparison with the
+> CMR library.
 
 ## What is Total Unimodularity?
 
@@ -97,11 +97,14 @@ Programming* (Chapters 19–20), implementing Theorem 20.3:
    rank(B) + rank(C) ≤ 2 (Theorem 20.2), then recurse on the six cases
    of Theorem 20.3.
 
-By default, step 4 is carried out differently: 2-separations
-(rank(B) + rank(C) ≤ 1) are found by a polynomial search and split off, and a
-block with no 2-separation is decided by an exact Ghouila-Houri partition
-test, because that is faster in practice than the general separation search;
-see [Performance](#performance).
+The partition in step 4 is not found with the general search of Theorem
+20.2, which is far too slow in practice. 2-separations
+(rank(B) + rank(C) ≤ 1) and 3-separations (rank(B) + rank(C) = 2) are each
+found by fixing a few entries of B and C, after which the side of every
+other row and column follows from single-premise rules, and a split is a
+closed set in a digraph; see [THEORY.md](THEORY.md). Blocks whose smaller
+dimension is at most 8 are decided by an exact Ghouila-Houri partition test
+instead, which is faster at that size.
 
 See [THEORY.md](THEORY.md) for full mathematical details and
 [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for implementation
@@ -109,38 +112,34 @@ decisions and known issues.
 
 ## Performance
 
-The cost of `is_totally_unimodular` is governed by the largest block that
-is left after all polynomial-time steps, not by the size of the input. Those
-steps are: reduction, splitting into connected components (1-sums), the
-network and special-matrix tests, and splitting along 2-separations (2-sums),
-each applied again to the pieces. A matrix built from small pieces by 1- and
-2-sums is therefore decided quickly at any size, as is any network matrix or
-transpose of one.
+`is_totally_unimodular` reduces the matrix, splits it into connected
+components (1-sums), tests each block for being a network matrix, the
+transpose of one, or F_1/F_2, and otherwise splits it along a 2-separation
+(2-sum) or, failing that, a 3-separation (3-sum), applying the same steps to
+the pieces. A block with no 2-separation and no 3-separation that is none of
+the basic types is not TU, by Seymour's theorem. All of these steps are
+polynomial; the most expensive is the 3-separation search, O((m+n)² · m · n)
+when no separation exists.
 
-A block that survives all of that — it has no 2-separation and is neither a
-network matrix, the transpose of one, nor F_1/F_2 — first passes a cheap
-Eulerian pre-filter and is then routed by size:
+The exact Ghouila-Houri partition test, exponential in the smaller
+dimension, remains in two places: for blocks whose smaller dimension is at
+most 8, where it is the faster option, and as a fallback when the
+decomposition cannot proceed (a repeated matrix on the recursion path, more
+than 100 nested pivots, or a 3-sum whose sign cannot be determined). No test
+or fuzz input triggers the fallback on the current code.
 
-- **Smaller dimension ≤ 24:** an exact branch-and-prune Ghouila-Houri
-  partition test. It is exponential in the smaller dimension, but answers in
-  milliseconds for typical inputs (worst case ~seconds up to min-dimension
-  20, ~13s at 22).
-- **Both dimensions > 24:** no practical route. Up to 64 rows plus columns
-  the block goes to the Seymour decomposition with the matroid-intersection
-  separation search of Theorem 20.2, O((m+n)^8); beyond that, to the
-  Ghouila-Houri test. Both are impractically slow at these sizes.
-
-So the practical limit is a smaller dimension of about 22 *for such a block*.
-The remaining gap to a polynomial algorithm is the search for 3-separations
-(3-sums), which is still exhaustive.
+In practice: matrices that split into small pieces, network matrices and
+3-sums of them are decided in milliseconds at sizes of several hundred rows.
+The slowest inputs measured are large matrices that are not TU but pass the
+cheap pre-filter, where the 3-separation search has to exhaust every
+candidate: about 1 s at 65×62.
 
 `cmr_is_totally_unimodular(M; algorithm=:decomposition)` instead runs the
-Seymour decomposition on blocks up to 12×12 (without the 2-sum split), finding
-the separation by
-enumerating all row/column bipartitions with a word-parallel GF(2) rank
-prefilter (rank mod 2 never exceeds rational rank). It gives the same
-answers but is slower — about 4× in aggregate on composed inputs, and 2.2 s
-against 3 ms on the hardest 12×12 input below.
+Seymour decomposition on blocks up to 12×12 with an exhaustive search for
+the separation: all row/column bipartitions, with a word-parallel GF(2)
+rank prefilter (rank mod 2 never exceeds rational rank). It gives the same
+answers and exists as an independent check on the default route; it is
+slower, 2.2 s against a few milliseconds on the hardest 12×12 input below.
 
 ### Benchmark: naive vs `is_totally_unimodular`
 
@@ -158,8 +157,8 @@ The "path" column shows which stage of the algorithm decides the answer.
 | Fano | 3×4 | false | 6 µs | 11 µs | Eulerian k≤3 filter |
 | one_sum(K₃₃, K₃₃) | 10×8 | true | 11.7 ms | 26 µs | 1-sum component split |
 | two_sum(K₃₃, K₃₃ᵈ) | 8×8 | true | 3.2 ms | 61 µs | 2-sum split |
-| CMR Eulerian test | 12×12 | false | 1.4 s | 2.5 ms | Ghouila-Houri |
-| CMR partition test | 14×14 | false | 15.7 s | 13.2 ms | Ghouila-Houri |
+| CMR Eulerian test | 12×12 | false | 1.4 s | 1.6 ms | no 3-separation |
+| CMR partition test | 14×14 | false | 15.7 s | 4.3 ms | no 3-separation |
 | 2-sum chain | 15×15 | true | — (infeasible) | 0.24 ms | 2-sum split |
 | 2-sum chain | 22×22 | true | — (infeasible) | 0.39 ms | 2-sum split |
 | 2-sum chain | 145×144 | true | — (infeasible) | 6.5 ms | 2-sum split |
@@ -182,54 +181,57 @@ finished. `benchmark/run.sh` reproduces the tables.
 
 | Matrix | Size | TU | CMR | `is_totally_unimodular` |
 |---|---|---|---|---|
-| K₃₃ | 5×4 | true | 0.34 ms | 0.012 ms |
-| F₁ | 5×5 | true | 0.34 ms | 0.009 ms |
-| R10 | 5×5 | true | 0.31 ms | 0.49 ms |
-| R12 | 6×6 | true | 0.86 ms | 0.077 ms |
-| Fano | 3×4 | false | 0.34 ms | 0.011 ms |
-| CMR Eulerian test | 12×12 | false | 2.8 ms | 2.5 ms |
-| CMR partition test | 14×14 | false | 3.7 ms | 13.2 ms |
+| K₃₃ | 5×4 | true | 0.43 ms | 0.011 ms |
+| F₁ | 5×5 | true | 0.45 ms | 0.008 ms |
+| R10 | 5×5 | true | 0.35 ms | 0.51 ms |
+| R12 | 6×6 | true | 1.2 ms | 0.078 ms |
+| Fano | 3×4 | false | 0.40 ms | 0.012 ms |
+| CMR Eulerian test | 12×12 | false | 3.1 ms | 1.6 ms |
+| CMR partition test | 14×14 | false | 4.0 ms | 4.3 ms |
 | 2-sum chain, 6 blocks | 22×22 | true | 1.5 ms | 0.39 ms |
-| 2-sum chain, 13 blocks | 47×46 | true | 3.1 ms | 1.2 ms |
-| 2-sum chain, 41 blocks | 145×144 | true | 12.5 ms | 6.5 ms |
+| 2-sum chain, 13 blocks | 47×46 | true | 3.4 ms | 1.2 ms |
+| 2-sum chain, 41 blocks | 145×144 | true | 13.1 ms | 6.6 ms |
 | 2-sum chain, 201 blocks | 705×704 | true | 0.23 s | 0.11 s |
-| 2-sum chain (13 blocks) + non-TU block | 50×48 | false | 3.6 ms | 1.3 ms |
+| 2-sum chain (13 blocks) + non-TU block | 50×48 | false | 3.4 ms | 1.3 ms |
 | 2-sum chain (201 blocks) + non-TU block | 708×706 | false | 0.22 s | 0.10 s |
-| random network | 20×40 | true | 0.57 ms | 0.15 ms |
-| random network | 50×100 | true | 0.91 ms | 0.79 ms |
-| random network | 100×200 | true | 1.5 ms | 2.5 ms |
-| random network | 200×400 | true | 2.9 ms | 8.4 ms |
-| network, one entry flipped | 50×100 | false | 0.15 s | 4.4 ms |
-| random sparse, density 0.1 | 30×30 | false | 1.9 ms | 0.35 ms |
-| random sparse, density 0.05 | 100×100 | false | 9.7 ms | 9.2 ms |
-| random sparse, density 0.5 | 20×20 | false | 0.43 ms | 0.38 ms |
+| random network | 20×40 | true | 0.60 ms | 0.16 ms |
+| random network | 50×100 | true | 0.92 ms | 0.76 ms |
+| random network | 100×200 | true | 1.6 ms | 2.5 ms |
+| random network | 200×400 | true | 2.9 ms | 7.7 ms |
+| network, one entry flipped | 50×100 | false | 0.14 s | 4.4 ms |
+| random sparse, density 0.1 | 30×30 | false | 1.9 ms | 0.38 ms |
+| random sparse, density 0.05 | 100×100 | false | 10.0 ms | 9.3 ms |
+| random sparse, density 0.5 | 20×20 | false | 0.43 ms | 0.37 ms |
 
 The next family has no 2-separation and is neither a network matrix nor the
 transpose of one: the 3-sum of the network matrix of Kₙ with the transpose
 of the network matrix of Kₘ plus one vertex of degree 3 (written Kₘ* below),
-with rows and columns permuted and rescaled. This is where
-`is_totally_unimodular` falls back to its exponential test.
+with rows and columns permuted and rescaled. These are decided through the
+3-separation search; before it existed, the 22×25 member took 7.5 s and the
+larger ones did not finish.
 
 | Matrix | Size | TU | CMR | `is_totally_unimodular` |
 |---|---|---|---|---|
-| K₅ ⊕₃ K₅* | 10×8 | true | 0.69 ms | 0.19 ms |
-| K₆ ⊕₃ K₅* | 11×12 | true | 1.4 ms | 1.5 ms |
-| K₆ ⊕₃ K₆* | 15×13 | true | 1.7 ms | 6.5 ms |
-| K₇ ⊕₃ K₆* | 16×18 | true | 1.1 ms | 61.8 ms |
-| K₇ ⊕₃ K₇* | 21×19 | true | 1.0 ms | 0.58 s |
-| K₈ ⊕₃ K₇* | 22×25 | true | 2.7 ms | 7.5 s |
-| K₈ ⊕₃ K₈* | 28×26 | true | 1.6 ms | > 2.5 min (stopped) |
-| K₉ ⊕₃ K₉* | 36×34 | true | 6.5 ms | > 2.5 min (stopped) |
-| K₁₂ ⊕₃ K₁₂* | 66×64 | true | 38.4 ms | > 2.5 min (stopped) |
-| the nine above, one entry flipped | 10×8 – 66×64 | false | 0.4 – 38 ms | 0.03 – 5.2 ms |
+| K₅ ⊕₃ K₅* | 10×8 | true | 0.74 ms | 0.19 ms |
+| K₆ ⊕₃ K₅* | 11×12 | true | 1.4 ms | 0.81 ms |
+| K₆ ⊕₃ K₆* | 15×13 | true | 1.7 ms | 2.0 ms |
+| K₇ ⊕₃ K₆* | 16×18 | true | 1.1 ms | 0.84 ms |
+| K₇ ⊕₃ K₇* | 21×19 | true | 1.0 ms | 0.75 ms |
+| K₈ ⊕₃ K₇* | 22×25 | true | 2.8 ms | 6.2 ms |
+| K₈ ⊕₃ K₈* | 28×26 | true | 1.6 ms | 1.9 ms |
+| K₉ ⊕₃ K₉* | 36×34 | true | 6.3 ms | 27.6 ms |
+| K₁₂ ⊕₃ K₁₂* | 66×64 | true | 39.2 ms | 33.7 ms |
+| the nine above, one entry flipped | 10×8 – 66×64 | false | 0.4 – 37 ms | 0.03 – 5.3 ms |
 
-In short: on small matrices this package wins on constant factors; on large
-matrices that split into small pieces it is level with CMR or ahead at the
-sizes measured; on large network matrices CMR is ahead (about 3× at
-200×400); and on large TU blocks with no 2-separation this package is
-unusable beyond a smaller dimension of about 22, while CMR stays in
-milliseconds. Non-TU inputs are usually cheap for both. If you need large
-general instances, use CMR.
+In short: on small matrices this package wins on constant factors, and on
+the larger ones measured here the two are within a small factor of each
+other in either direction, CMR being ahead on large network matrices (about
+3× at 200×400) and on some of the 3-sum family (4× at 36×34). The table
+does not show this package's worst case: a large matrix that is not TU but
+passes the cheap pre-filter makes the 3-separation search try every
+candidate, about 1 s at 65×62 where CMR takes tens of milliseconds, and the
+gap grows with size. CMR's algorithm has the better complexity; prefer it
+for very large instances.
 
 Rank computations avoid floating-point SVD entirely: the hot paths use
 Float64 Gaussian elimination (exact for the small {-1,0,1} matrices arising
@@ -249,9 +251,11 @@ The test suite verifies `is_totally_unimodular` against
 `naive_is_totally_unimodular` on 2000 random matrices of size up to 5×6, and
 against the exact Ghouila-Houri test on larger random matrices and on 2000
 structured inputs (sums of F_1, F_2, K₃,₃ and network matrices with random
-pivots and scalings) that exercise the decomposition cases. The 2-separation
-search is checked against brute-force enumeration on small matrices, and
-2-sum chains up to 705×704 are tested end to end.
+pivots and scalings) that exercise the decomposition cases. The 2- and
+3-separation searches are checked against brute-force enumeration on small
+matrices; 2-sum chains up to 705×704 and 3-sums up to 66×64 are tested end
+to end, and 1500 pivoted, trimmed and perturbed 3-sums are compared with the
+exact test.
 
 ## Background
 
@@ -273,6 +277,14 @@ algorithm.
 - Ghouila-Houri, A. (1962). Caractérisation des matrices totalement
   unimodulaires. *Comptes Rendus de l'Académie des Sciences*, 254,
   1192–1194.
+- Walter, M. and Truemper, K. (2013). Implementation of a unimodularity
+  test. *Mathematical Programming Computation*, 5(1), 57–73. The method
+  behind CMR's total unimodularity test.
+- CMR — Combinatorial Matrix Recognition, a C library by Matthias Walter:
+  <https://github.com/discopt/cmr> (MIT license). The
+  `cmr_is_totally_unimodular` interface mirrors its `CMRtuTest`, part of
+  this package's test suite is ported from its `test_tu.cpp`, and the
+  benchmarks above compare against it.
 
 ## Authors
 
