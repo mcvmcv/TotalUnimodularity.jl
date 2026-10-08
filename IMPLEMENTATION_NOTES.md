@@ -241,10 +241,37 @@ enumeration of all splits under the same precondition.
 (and columns). This was a pairwise comparison, O(m²n), with an allocation
 per pair for the negated row; `_reduce` runs at every level of the
 recursion, and on the 705×704 chain it accounted for 91% of a 59 s run.
-`_independent_mask` keys each vector by itself or its negative, whichever
-has a positive first nonzero, and uses a `Set`: linear in the size of the
-matrix (59 s → 10 s on that input, 133 ms → 42 ms on a 200×400 network
-matrix).
+`_independent_mask` hashes each vector with the sign that makes its first
+nonzero positive, chains vectors with equal hashes and compares those entry
+by entry: linear in the size of the matrix, and no allocation per vector
+(59 s → 10 s on that input, 133 ms → 42 ms on a 200×400 network matrix).
+
+### Network test without building graphs
+`_is_network_matrix` follows Theorem 20.1 step by step, and the first
+version built each object the theorem names. Profiling a 200×400 network
+matrix showed nearly all of the time going into that construction rather
+than into deciding anything, so three steps now work on the matrix directly
+(42 ms → 8 ms on that input; the answers were checked against the previous
+implementation on 60,000 random matrices):
+
+- `_find_disconnected_gi` built G_i for every row i with `Graphs.add_edge!`,
+  one clique per column, to ask whether it is connected. Rows are adjacent
+  in G_i when they share a column that is zero in row i, so a search that
+  alternates between rows and such columns on precomputed supports gives
+  the components in O(nnz) per i. The function returns
+  `(i, components, orig)`; the graph is gone.
+- Case 1 (all columns ≤ 2 nonzeros) built the row graph and called
+  `Graphs.is_bipartite`. Bipartiteness of that graph is a 2-colouring
+  constraint per column — different colours for a same-sign pair, equal for
+  an opposite-sign pair — which a union-find with parities checks in one
+  pass over the columns.
+- The submatrices M_k kept all n columns of M, so the recursion carried the
+  full width down to pieces with a handful of rows. Columns that are zero
+  on the rows of M_k take no part in any step and are dropped
+  (`_split_submatrices(...; drop_zero_columns = true)`).
+
+`_build_h` still uses Graphs.jl; it runs once per level on the components,
+not once per row.
 
 ### Recursion depth counts pivots only
 `depth` used to be incremented on every recursive call, with a cutoff at

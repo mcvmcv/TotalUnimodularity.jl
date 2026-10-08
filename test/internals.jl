@@ -9,9 +9,9 @@ import TotalUnimodularity: _tu_partition, _gf2_rank_capped, _find_two_separation
                             _has_dependent_cols, _has_dependent_vectors,
                             _drop_dependent_rows, _drop_dependent_cols,
                             _drop_dependent_vectors, _reduce,
-                            _all_columns_few_nonzeros, _build_row_graph,
+                            _all_columns_few_nonzeros,
                             _is_network_matrix_few_nonzeros,
-                            _build_gi, _find_disconnected_gi,
+                            _find_disconnected_gi,
                             _compute_w_sets, _build_h, _is_network_matrix,
                             _split_submatrices, _decompose, _extract_rank1,
                             _find_epsilon, _det_int!
@@ -175,30 +175,29 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         @test !_is_network_matrix_few_nonzeros([1 1 0; 1 0 1; 0 1 1])
     end
 
-    @testset "_build_gi" begin
-        # Simple matrix where G_1 should be disconnected
-        # Row 1 is [1,1,0,0], rows 2,3 share col 1, rows 4,5 share col 2
-        # but no column has nonzeros in both {2,3} and {4,5} with zero in row 1
-        M = [1 1 0 0; 1 0 1 0; 1 0 0 1; 0 1 1 0; 0 1 0 1]
-        g, orig = _build_gi(M, 1)
-        @test !Graphs.is_connected(g)
-        @test length(Graphs.connected_components(g)) == 2
-    end
-
     @testset "_find_disconnected_gi" begin
         # F_1: all G_i connected → not a network matrix
         @test _find_disconnected_gi(F_1) === nothing
 
+        # Row 1 is [1,1,0,0]. The columns that are zero in row 1 are column 3
+        # (rows 2 and 4) and column 4 (rows 3 and 5), so G_1 has the
+        # components {2,4} and {3,5}.
+        M = [1 1 0 0; 1 0 1 0; 1 0 0 1; 0 1 1 0; 0 1 0 1]
+        i, components, orig = _find_disconnected_gi(M)
+        @test i == 1
+        @test orig == [2, 3, 4, 5]
+        @test sort([sort(orig[c]) for c in components]) == [[2, 4], [3, 5]]
+
         # F_2: G_1 disconnected with 4 singleton components
         result = _find_disconnected_gi(F_2)
         @test result !== nothing
-        i, g, components, orig = result
+        i, components, orig = result
         @test i == 1
         @test length(components) == 4
 
         result = _find_disconnected_gi(M3)
         @test result !== nothing
-        i, g, components, orig = result
+        i, components, orig = result
         @test i == 3
         @test length(components) == 2
     end
@@ -206,7 +205,7 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
     @testset "_compute_w_sets" begin
         # Use F_2 where G_1 is disconnected
         result = _find_disconnected_gi(F_2)
-        i, g, components, orig = result
+        i, components, orig = result
 
         W, W_rows, U = _compute_w_sets(F_2, i, components, orig)
 
@@ -226,7 +225,7 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
 
     @testset "_build_h" begin
         result = _find_disconnected_gi(F_2)
-        i, g, components, orig = result
+        i, components, orig = result
         W, W_rows, U = _compute_w_sets(F_2, i, components, orig)
         h = _build_h(components, orig, W_rows, U)
 
@@ -238,7 +237,7 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
 
         # H for M3 should be bipartite (M3 is a network matrix)
         result = _find_disconnected_gi(M3)
-        i, g, components, orig = result
+        i, components, orig = result
         W, W_rows, U = _compute_w_sets(M3, i, components, orig)
         h = _build_h(components, orig, W_rows, U)
         @test Graphs.is_bipartite(h)
@@ -246,7 +245,7 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
 
     @testset "_split_submatrices" begin
         result = _find_disconnected_gi(F_2)
-        i, g, components, orig = result
+        i, components, orig = result
         submatrices = _split_submatrices(F_2, i, components, orig)
 
         # Should have one submatrix per component
@@ -264,7 +263,7 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
 
         # Test with M3
         result = _find_disconnected_gi(M3)
-        i, g, components, orig = result
+        i, components, orig = result
         submatrices = _split_submatrices(M3, i, components, orig)
         @test length(submatrices) == length(components)
         for (k, component) in enumerate(components)
@@ -272,6 +271,13 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         end
         for Mk in submatrices
             @test Mk[1, :] == M3[i, :]
+        end
+        # dropping zero columns keeps the rows and every nonzero
+        for (Mk, Dk) in zip(submatrices, _split_submatrices(M3, i, components, orig;
+                                                              drop_zero_columns = true))
+            @test size(Dk, 1) == size(Mk, 1)
+            @test all(j -> any(!iszero, Dk[:, j]), 1:size(Dk, 2))
+            @test Dk == Mk[:, [any(!iszero, Mk[:, j]) for j in 1:size(Mk, 2)]]
         end
     end    
 

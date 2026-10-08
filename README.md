@@ -149,25 +149,26 @@ The "path" column shows which stage of the algorithm decides the answer.
 
 | Matrix | Size | TU | naive | `is_totally_unimodular` | deciding path |
 |---|---|---|---|---|---|
-| identity | 3×3 | true | 2 µs | 15 µs | reduced to empty |
-| network matrix | 3×3 | true | 3 µs | 9 µs | network test |
-| K₃₃ | 5×4 | true | 14 µs | 61 µs | network test |
-| F₁ | 5×5 | true | 29 µs | 58 µs | special matrix (F₁/F₂) |
-| R10 | 5×5 | true | 25 µs | 534 µs | special matrix (F₁/F₂) |
-| R12 | 6×6 | true | 171 µs | 83 µs | Ghouila-Houri |
-| Fano | 3×4 | false | 6 µs | 36 µs | Eulerian k≤3 filter |
-| one_sum(K₃₃, K₃₃) | 10×8 | true | 11.7 ms | 86 µs | 1-sum component split |
-| two_sum(K₃₃, K₃₃ᵈ) | 8×8 | true | 3.2 ms | 107 µs | 2-sum split |
+| identity | 3×3 | true | 2 µs | 3.8 µs | reduced to empty |
+| network matrix | 3×3 | true | 3 µs | 2.6 µs | network test |
+| K₃₃ | 5×4 | true | 14 µs | 12 µs | network test |
+| F₁ | 5×5 | true | 29 µs | 8.7 µs | special matrix (F₁/F₂) |
+| R10 | 5×5 | true | 25 µs | 487 µs | special matrix (F₁/F₂) |
+| R12 | 6×6 | true | 171 µs | 77 µs | Ghouila-Houri |
+| Fano | 3×4 | false | 6 µs | 11 µs | Eulerian k≤3 filter |
+| one_sum(K₃₃, K₃₃) | 10×8 | true | 11.7 ms | 26 µs | 1-sum component split |
+| two_sum(K₃₃, K₃₃ᵈ) | 8×8 | true | 3.2 ms | 61 µs | 2-sum split |
 | CMR Eulerian test | 12×12 | false | 1.4 s | 2.5 ms | Ghouila-Houri |
-| CMR partition test | 14×14 | false | 15.7 s | 13.4 ms | Ghouila-Houri |
-| 2-sum chain | 15×15 | true | — (infeasible) | 0.43 ms | 2-sum split |
-| 2-sum chain | 22×22 | true | — (infeasible) | 0.72 ms | 2-sum split |
-| 2-sum chain | 145×144 | true | — (infeasible) | 13.3 ms | 2-sum split |
-| 2-sum chain | 705×704 | true | — (infeasible) | 0.25 s | 2-sum split |
+| CMR partition test | 14×14 | false | 15.7 s | 13.2 ms | Ghouila-Houri |
+| 2-sum chain | 15×15 | true | — (infeasible) | 0.24 ms | 2-sum split |
+| 2-sum chain | 22×22 | true | — (infeasible) | 0.39 ms | 2-sum split |
+| 2-sum chain | 145×144 | true | — (infeasible) | 6.5 ms | 2-sum split |
+| 2-sum chain | 705×704 | true | — (infeasible) | 0.11 s | 2-sum split |
 
-For tiny matrices the naive checker wins on constant factors;
-`is_totally_unimodular` pulls ahead from ~6×6 and remains usable far beyond
-the naive checker's exponential wall.
+The naive checker and `is_totally_unimodular` are level on the very
+smallest matrices; `is_totally_unimodular` pulls ahead from about 5×5 (R10
+is the exception) and remains usable far beyond the naive checker's
+exponential wall. The naive column was measured earlier than the other.
 
 ### Benchmark: CMR vs `is_totally_unimodular`
 
@@ -181,27 +182,27 @@ finished. `benchmark/run.sh` reproduces the tables.
 
 | Matrix | Size | TU | CMR | `is_totally_unimodular` |
 |---|---|---|---|---|
-| K₃₃ | 5×4 | true | 0.38 ms | 0.017 ms |
-| F₁ | 5×5 | true | 0.40 ms | 0.016 ms |
-| R10 | 5×5 | true | 0.40 ms | 0.47 ms |
-| R12 | 6×6 | true | 0.89 ms | 0.086 ms |
-| Fano | 3×4 | false | 0.40 ms | 0.014 ms |
-| CMR Eulerian test | 12×12 | false | 3.4 ms | 2.5 ms |
-| CMR partition test | 14×14 | false | 4.4 ms | 13.4 ms |
-| 2-sum chain, 6 blocks | 22×22 | true | 2.1 ms | 0.72 ms |
-| 2-sum chain, 13 blocks | 47×46 | true | 3.0 ms | 2.4 ms |
-| 2-sum chain, 41 blocks | 145×144 | true | 14.0 ms | 13.3 ms |
-| 2-sum chain, 201 blocks | 705×704 | true | 0.24 s | 0.25 s |
-| 2-sum chain (13 blocks) + non-TU block | 50×48 | false | 3.9 ms | 2.4 ms |
-| 2-sum chain (201 blocks) + non-TU block | 708×706 | false | 0.23 s | 0.26 s |
-| random network | 20×40 | true | 0.60 ms | 0.31 ms |
-| random network | 50×100 | true | 0.94 ms | 2.1 ms |
-| random network | 100×200 | true | 1.6 ms | 11.5 ms |
-| random network | 200×400 | true | 3.0 ms | 41.8 ms |
-| network, one entry flipped | 50×100 | false | 0.15 s | 10.2 ms |
-| random sparse, density 0.1 | 30×30 | false | 2.2 ms | 0.86 ms |
-| random sparse, density 0.05 | 100×100 | false | 10.1 ms | 46.1 ms |
-| random sparse, density 0.5 | 20×20 | false | 0.47 ms | 1.6 ms |
+| K₃₃ | 5×4 | true | 0.34 ms | 0.012 ms |
+| F₁ | 5×5 | true | 0.34 ms | 0.009 ms |
+| R10 | 5×5 | true | 0.31 ms | 0.49 ms |
+| R12 | 6×6 | true | 0.86 ms | 0.077 ms |
+| Fano | 3×4 | false | 0.34 ms | 0.011 ms |
+| CMR Eulerian test | 12×12 | false | 2.8 ms | 2.5 ms |
+| CMR partition test | 14×14 | false | 3.7 ms | 13.2 ms |
+| 2-sum chain, 6 blocks | 22×22 | true | 1.5 ms | 0.39 ms |
+| 2-sum chain, 13 blocks | 47×46 | true | 3.1 ms | 1.2 ms |
+| 2-sum chain, 41 blocks | 145×144 | true | 12.5 ms | 6.5 ms |
+| 2-sum chain, 201 blocks | 705×704 | true | 0.23 s | 0.11 s |
+| 2-sum chain (13 blocks) + non-TU block | 50×48 | false | 3.6 ms | 1.3 ms |
+| 2-sum chain (201 blocks) + non-TU block | 708×706 | false | 0.22 s | 0.10 s |
+| random network | 20×40 | true | 0.57 ms | 0.15 ms |
+| random network | 50×100 | true | 0.91 ms | 0.79 ms |
+| random network | 100×200 | true | 1.5 ms | 2.5 ms |
+| random network | 200×400 | true | 2.9 ms | 8.4 ms |
+| network, one entry flipped | 50×100 | false | 0.15 s | 4.4 ms |
+| random sparse, density 0.1 | 30×30 | false | 1.9 ms | 0.35 ms |
+| random sparse, density 0.05 | 100×100 | false | 9.7 ms | 9.2 ms |
+| random sparse, density 0.5 | 20×20 | false | 0.43 ms | 0.38 ms |
 
 The next family has no 2-separation and is neither a network matrix nor the
 transpose of one: the 3-sum of the network matrix of Kₙ with the transpose
@@ -211,21 +212,21 @@ with rows and columns permuted and rescaled. This is where
 
 | Matrix | Size | TU | CMR | `is_totally_unimodular` |
 |---|---|---|---|---|
-| K₅ ⊕₃ K₅* | 10×8 | true | 0.74 ms | 0.22 ms |
-| K₆ ⊕₃ K₅* | 11×12 | true | 1.7 ms | 1.6 ms |
-| K₆ ⊕₃ K₆* | 15×13 | true | 2.0 ms | 7.1 ms |
-| K₇ ⊕₃ K₆* | 16×18 | true | 1.3 ms | 66.0 ms |
-| K₇ ⊕₃ K₇* | 21×19 | true | 1.1 ms | 0.62 s |
-| K₈ ⊕₃ K₇* | 22×25 | true | 3.2 ms | 8.1 s |
-| K₈ ⊕₃ K₈* | 28×26 | true | 1.7 ms | > 2.5 min (stopped) |
-| K₉ ⊕₃ K₉* | 36×34 | true | 6.3 ms | > 2.5 min (stopped) |
-| K₁₂ ⊕₃ K₁₂* | 66×64 | true | 39.2 ms | > 2.5 min (stopped) |
-| the nine above, one entry flipped | 10×8 – 66×64 | false | 0.4 – 37 ms | 0.07 – 14 ms |
+| K₅ ⊕₃ K₅* | 10×8 | true | 0.69 ms | 0.19 ms |
+| K₆ ⊕₃ K₅* | 11×12 | true | 1.4 ms | 1.5 ms |
+| K₆ ⊕₃ K₆* | 15×13 | true | 1.7 ms | 6.5 ms |
+| K₇ ⊕₃ K₆* | 16×18 | true | 1.1 ms | 61.8 ms |
+| K₇ ⊕₃ K₇* | 21×19 | true | 1.0 ms | 0.58 s |
+| K₈ ⊕₃ K₇* | 22×25 | true | 2.7 ms | 7.5 s |
+| K₈ ⊕₃ K₈* | 28×26 | true | 1.6 ms | > 2.5 min (stopped) |
+| K₉ ⊕₃ K₉* | 36×34 | true | 6.5 ms | > 2.5 min (stopped) |
+| K₁₂ ⊕₃ K₁₂* | 66×64 | true | 38.4 ms | > 2.5 min (stopped) |
+| the nine above, one entry flipped | 10×8 – 66×64 | false | 0.4 – 38 ms | 0.03 – 5.2 ms |
 
 In short: on small matrices this package wins on constant factors; on large
-matrices that split into small pieces it keeps pace with CMR at the sizes
-measured; on large network matrices CMR scales better (14× at 200×400); and
-on large TU blocks with no 2-separation it is
+matrices that split into small pieces it is level with CMR or ahead at the
+sizes measured; on large network matrices CMR is ahead (about 3× at
+200×400); and on large TU blocks with no 2-separation this package is
 unusable beyond a smaller dimension of about 22, while CMR stays in
 milliseconds. Non-TU inputs are usually cheap for both. If you need large
 general instances, use CMR.

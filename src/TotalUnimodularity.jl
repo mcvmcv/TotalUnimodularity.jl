@@ -60,6 +60,7 @@ _is_trivial_vector(v::AbstractVector) = count(!iszero, v) <= 1
 # dim=1 drops trivial rows; dim=2 drops trivial columns.
 function _drop_trivial_vectors(M::Matrix{Int}, dim::Int)
     mask = [!_is_trivial_vector(s) for s in eachslice(M, dims=dim)]
+    all(mask) && return M
     return dim == 1 ? M[mask, :] : M[:, mask]
 end
 
@@ -191,20 +192,44 @@ _is_degenerate(M::Matrix{Int}) =
     _has_dependent_vectors(M)
 
 # Mark the first vector of each class of equal-or-opposite vectors of M along
-# `dim` (1: rows, 2: columns). Each vector is keyed by itself or its negative,
-# whichever has a positive first nonzero, so a class shares one key and the
-# cost is linear in the size of M rather than quadratic in the vector count.
+# `dim` (1: rows, 2: columns). Each vector is hashed with the sign that makes
+# its first nonzero positive, so a class shares one hash; vectors with the
+# same hash are chained and compared entry by entry. The cost is linear in
+# the size of M, where comparing all pairs is quadratic in the vector count.
 function _independent_mask(M::Matrix{Int}, dim::Int)::BitVector
     n = size(M, dim)
+    len = size(M, 3 - dim)
     keep = trues(n)
     n < 2 && return keep
-    seen = Set{Vector{Int}}()
-    sizehint!(seen, n)
-    for i in 1:n
-        v = dim == 1 ? M[i, :] : M[:, i]
-        k = findfirst(!iszero, v)
-        k !== nothing && v[k] < 0 && (v .= .-v)
-        v in seen ? (keep[i] = false) : push!(seen, v)
+    entry(i, k) = dim == 1 ? M[i, k] : M[k, i]
+    sign = ones(Int, n)
+    first_with = Dict{UInt, Int}()       # hash => first kept vector with it
+    next_with = zeros(Int, n)            # chain of kept vectors sharing a hash
+    sizehint!(first_with, n)
+    @inbounds for i in 1:n
+        h = zero(UInt)
+        s = 0
+        for k in 1:len
+            x = entry(i, k)
+            s == 0 && x != 0 && (s = x)
+            h = hash(s * x, h)
+        end
+        s != 0 && (sign[i] = s)
+        j = get(first_with, h, 0)
+        if j == 0
+            first_with[h] = i
+            continue
+        end
+        last = j
+        while j != 0
+            if all(k -> sign[i] * entry(i, k) == sign[j] * entry(j, k), 1:len)
+                keep[i] = false
+                break
+            end
+            last = j
+            j = next_with[j]
+        end
+        keep[i] && (next_with[last] = i)
     end
     keep
 end
@@ -440,7 +465,7 @@ function _reduce(M::Matrix{Int})::Tuple{Bool, Matrix{Int}}
     while true
         N = _drop_trivial_vectors(_drop_trivial_vectors(M, 1), 2)
         N = _drop_dependent_vectors(N)
-        N == M && return (true, M)
+        size(N) == size(M) && return (true, M)     # nothing was dropped
         M = N
     end
 end
@@ -497,98 +522,109 @@ end
 
 # Return true if all columns of M have at most 2 nonzeros.
 _all_columns_few_nonzeros(M::Matrix{Int}) =
-    all(j -> count(!iszero, M[:, j]) <= 2, 1:size(M, 2))
-
-# Build the undirected graph G on rows for Case 1.
-# Vertices are rows 1..m.
-# For each column with exactly 2 nonzeros in rows i and j:
-#   - same sign: add edge (i,j)
-#   - opposite sign: add path of length 2 via new intermediate vertex
-# Returns a Graphs.SimpleGraph.
-function _build_row_graph(M::Matrix{Int})
-    m, n = size(M)
-    # We may need up to m + n extra vertices for intermediate nodes
-    g = Graphs.SimpleGraph(m + n)
-    next_vertex = m + 1  # first intermediate vertex index
-
-    for j in 1:n
-        rows = findall(!iszero, M[:, j])
-        length(rows) == 2 || continue
-        i, k = rows[1], rows[2]
-        if M[i, j] == M[k, j]  # same sign
-            Graphs.add_edge!(g, i, k)
-        else  # opposite sign — path of length 2
-            Graphs.add_edge!(g, i, next_vertex)
-            Graphs.add_edge!(g, next_vertex, k)
-            next_vertex += 1
-        end
-    end
-    return g
-end
+    all(j -> count(!iszero, @view M[:, j]) <= 2, 1:size(M, 2))
 
 # Case 1: test if M is a network matrix when all columns have ≤2 nonzeros.
-# M is a network matrix iff the row graph G is bipartite.
+# Let G be the graph on the rows in which a column with two nonzeros of the
+# same sign is an edge between its two rows, and one with opposite signs a
+# path of length 2 through a new vertex. M is a network matrix iff G is
+# bipartite, i.e. iff the rows can be 2-coloured so that same-sign columns
+# join different colours and opposite-sign columns equal ones. That is
+# checked with a union-find structure carrying each row's colour relative to
+# its root, without building G.
 function _is_network_matrix_few_nonzeros(M::Matrix{Int})
-    g = _build_row_graph(M)
-    return Graphs.is_bipartite(g)
-end
-
-# Build graph G_i for row index i.
-# Vertices are 1..m with i removed — we map them to 1..m-1.
-# Returns (graph, vertex_map) where vertex_map[v] gives the original row index.
-function _build_gi(M::Matrix{Int}, i::Int)
     m, n = size(M)
-    # Map original row indices to graph vertices
-    orig = [j for j in 1:m if j != i]  # orig[v] = original row index
-    idx = zeros(Int, m)
-    for (v, j) in enumerate(orig)
-        idx[j] = v  # idx[j] = vertex for row j
+    parent = collect(1:m)
+    parity = zeros(Int, m)               # colour relative to parent
+    function find(x)
+        root = x; p = 0
+        @inbounds while parent[root] != root
+            p ⊻= parity[root]; root = parent[root]
+        end
+        @inbounds while parent[x] != root && x != root   # path compression
+            nxt = parent[x]; q = parity[x]
+            parent[x] = root; parity[x] = p
+            p ⊻= q; x = nxt
+        end
+        root
     end
-
-    g = Graphs.SimpleGraph(m - 1)
-    for col in 1:n
-        M[i, col] == 0 || continue  # skip columns with nonzero in row i
-        rows = findall(!iszero, M[:, col])
-        # Add edges between all pairs of rows with nonzeros in this column
-        for a in 1:length(rows), b in a+1:length(rows)
-            Graphs.add_edge!(g, idx[rows[a]], idx[rows[b]])
+    @inbounds for j in 1:n
+        i = 0; k = 0; cnt = 0
+        for r in 1:m
+            M[r, j] == 0 && continue
+            cnt += 1
+            cnt == 1 ? (i = r) : (k = r)
+        end
+        cnt == 2 || continue
+        differ = M[i, j] == M[k, j] ? 1 : 0
+        ri = find(i); rk = find(k)
+        ci = parent[i] == i ? 0 : parity[i]      # relative to root, after compression
+        ck = parent[k] == k ? 0 : parity[k]
+        if ri == rk
+            ci ⊻ ck == differ || return false
+        else
+            parent[ri] = rk
+            parity[ri] = ci ⊻ ck ⊻ differ
         end
     end
-    return g, orig
+    return true
 end
 
-# Simple BFS connected-components for a Graphs.SimpleGraph.
-# Avoids Graphs.jl's connected_components overhead (vect allocations) on small graphs.
-function _bfs_components(g::Graphs.SimpleGraph)
-    n = Graphs.nv(g)
-    visited = zeros(Bool, n)
-    comps = Vector{Int}[]
-    for start in 1:n
-        visited[start] && continue
-        comp = Int[start]
-        visited[start] = true
-        qi = 1
-        while qi <= length(comp)
-            v = comp[qi]; qi += 1
-            for w in Graphs.neighbors(g, v)
-                visited[w] && continue
-                visited[w] = true
-                push!(comp, w)
+# Find the first row index i for which G_i is disconnected, where G_i is the
+# graph on the rows other than i in which two rows are adjacent when they
+# share a column that is zero in row i.
+# Returns (i, components, orig) or nothing if all G_i are connected. The
+# vertices of G_i are numbered 1..m-1 in row order, orig[v] is the row of
+# vertex v, and each component is a vector of vertices.
+#
+# G_i is never built: its components are found by a search that alternates
+# between rows and the columns that are zero in row i, on the supports of M.
+# Each column is expanded once, so one i costs O(nnz).
+function _find_disconnected_gi(M::Matrix{Int})
+    m, n = size(M)
+    m < 3 && return nothing                  # G_i has at most one vertex
+    row_cols = [findall(!iszero, @view M[r, :]) for r in 1:m]
+    col_rows = [findall(!iszero, @view M[:, c]) for c in 1:n]
+    seen_row = falses(m)
+    seen_col = falses(n)
+    queue = Vector{Int}(undef, m)
+
+    # Search from row `start`, appending the rows reached to queue[tail+1:end];
+    # returns the new tail.
+    function component!(i, start, tail)
+        head = tail
+        seen_row[start] = true
+        queue[tail += 1] = start
+        @inbounds while head < tail
+            r = queue[head += 1]
+            for c in row_cols[r]
+                (seen_col[c] || M[i, c] != 0) && continue
+                seen_col[c] = true
+                for r2 in col_rows[c]
+                    seen_row[r2] && continue
+                    seen_row[r2] = true
+                    queue[tail += 1] = r2
+                end
             end
         end
-        push!(comps, comp)
+        tail
     end
-    comps
-end
 
-# Find the first row index i for which G_i is disconnected.
-# Returns (i, graph, components, vertex_map) or nothing if all G_i are connected.
-function _find_disconnected_gi(M::Matrix{Int})
-    m = size(M, 1)
     for i in 1:m
-        g, orig = _build_gi(M, i)
-        comps = _bfs_components(g)
-        length(comps) > 1 && return (i, g, comps, orig)
+        fill!(seen_row, false)
+        fill!(seen_col, false)
+        seen_row[i] = true
+        tail = component!(i, i == 1 ? 2 : 1, 0)
+        tail == m - 1 && continue            # G_i is connected
+        vertex(r) = r < i ? r : r - 1
+        components = [[vertex(queue[k]) for k in 1:tail]]
+        for r in 1:m
+            seen_row[r] && continue
+            from = tail
+            tail = component!(i, r, tail)
+            push!(components, [vertex(queue[k]) for k in from+1:tail])
+        end
+        return (i, components, [r for r in 1:m if r != i])
     end
     return nothing
 end
@@ -628,7 +664,7 @@ function _compute_w_sets(M::Matrix{Int}, i::Int,
     W_rows = Dict{Int, Set{Int}}()
     for j in 1:m
         j == i && continue
-        W_rows[j] = W ∩ Set(findall(!iszero, M[j, :]))
+        W_rows[j] = Set(c for c in W if M[j, c] != 0)
     end
 
     # U_k = union of W_j for all j in component k
@@ -707,8 +743,13 @@ Schrijver, *Theory of Linear and Integer Programming*, Chapter 20.
 """
 function _split_submatrices(M::Matrix{Int}, i::Int,
                              components::Vector{Vector{Int}},
-                             orig::Vector{Int})
-    return [M[[i; [orig[v] for v in component]], :] for component in components]
+                             orig::Vector{Int}; drop_zero_columns::Bool = false)
+    map(components) do component
+        rows = [i; [orig[v] for v in component]]
+        drop_zero_columns || return M[rows, :]
+        cols = [j for j in 1:size(M, 2) if any(r -> M[r, j] != 0, rows)]
+        M[rows, cols]
+    end
 end
 
 """
@@ -751,15 +792,17 @@ function _is_network_matrix(M::Matrix{Int})
     # All G_i connected → not a network matrix
     result === nothing && return false
 
-    i, g, components, orig = result
+    i, components, orig = result
     W, W_rows, U = _compute_w_sets(M, i, components, orig)
     h = _build_h(components, orig, W_rows, U)
 
     # H must be bipartite
     Graphs.is_bipartite(h) || return false
 
-    # Recursively test each submatrix
-    submatrices = _split_submatrices(M, i, components, orig)
+    # Recursively test each submatrix. Columns that are zero on the rows of
+    # a submatrix play no part in any step of the test, and dropping them
+    # keeps the recursion from carrying the full width of M all the way down.
+    submatrices = _split_submatrices(M, i, components, orig; drop_zero_columns = true)
     return all(_is_network_matrix, submatrices)
 end
 
