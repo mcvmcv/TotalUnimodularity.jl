@@ -24,15 +24,16 @@ function writemat(io, M)
     for r in eachrow(M); println(io, join(r, " ")); end
 end
 
-# CMR's answer, or `nothing` if it gives none. With default options cmr-tu
-# aborts on some non-TU matrices ("User input error", reported upstream in
-# October 2026), so a failed run is repeated without the simple 3-separation
-# search, which avoids that code path.
+# CMR's answer, or `nothing` if it gives none. Up to commit 1c1c6eaf, cmr-tu
+# with default options aborts on some non-TU matrices ("User input error",
+# discopt/cmr issue #115), so a failed run is repeated without the simple
+# separation search, which avoids that code path. The fix for that issue
+# renames the option, so both spellings are tried.
 function cmr(M)
     f = tempname()
     open(io -> writemat(io, M), f, "w")
     try
-        for opts in (String[], ["--no-simple-3-sepa"])
+        for opts in (String[], ["--no-simple-3-sepa"], ["--no-simple-sepa"])
             out = try read(pipeline(`$CMR_TU $f $opts`; stderr = devnull), String) catch; "" end
             occursin("IS totally", out) && return true
             occursin("IS NOT", out) && return false
