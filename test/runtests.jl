@@ -3,6 +3,9 @@ using Test
 using LinearAlgebra
 using Random
 
+# Counts of fallbacks to the exact test at the start; see the last testset.
+const fallbacks_before = map(x -> x[], TotalUnimodularity._FALLBACKS)
+
 include("internals.jl")
 include("test_cmr.jl")
 
@@ -258,6 +261,24 @@ include("test_cmr.jl")
             @test !is_totally_unimodular(scramble(three_sum(A_Kn(n), Bbad)))
         end
 
+        # A non-TU matrix on which the CMR library (commit 1c1c6eaf, default
+        # options) aborts with an internal error instead of answering; found
+        # by fuzzing against it. Rows 1, 6, 7 and columns 1, 4, 6 have
+        # determinant -2.
+        cmr_abort = [-1  0  0  1  0  0  1
+                      0  0 -1  0 -1  0  0
+                      1  1  0 -1  1  0  0
+                      0  0  1  0  0  0 -1
+                      0  1  0  0  0  0  1
+                      0  0  0 -1  0 -1  0
+                      1  0  0  0  0 -1  0]
+        @test !naive_is_totally_unimodular(cmr_abort)
+        @test !tu_both_routes(cmr_abort)
+        @test !tu_both_routes(Matrix{Int}(cmr_abort'))
+        for alg in (:eulerian, :partition)
+            @test !cmr_is_totally_unimodular(cmr_abort; algorithm = alg)
+        end
+
         # Against the exact test, with the search route forced on at every
         # size: pivots, deletions and entry flips of the small members.
         base = [scramble(three_sum(A_Kn(n), B_Km(m))) for (n, m) in ((5, 5), (6, 5), (6, 6))]
@@ -414,6 +435,13 @@ include("test_cmr.jl")
         @test n_bad == 0
         # The generator must keep producing both answers in bulk.
         @test n_total ÷ 4 < n_tu < 3 * n_total ÷ 4
+    end
+
+
+    # The decomposition is expected never to give up and hand a matrix to
+    # the exact test (see _FALLBACKS). Everything above ran without doing so.
+    @testset "no fallback to the exact test" begin
+        @test map(x -> x[], TotalUnimodularity._FALLBACKS) == fallbacks_before
     end
 
 end

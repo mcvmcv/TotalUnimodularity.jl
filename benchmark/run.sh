@@ -8,7 +8,8 @@
 # is the recognition time it reports with --stats (no process start, no file
 # reading); Julia's is measured after JIT warmup. TIMEOUT (default 180) is the
 # per-matrix limit in seconds for each side; on the Julia side it includes
-# startup and warmup, about 15 s, since every matrix gets a fresh process.
+# startup and warmup, a second or two, since every matrix gets a fresh
+# process.
 set -u
 CMR_TU=${CMR_TU:-cmr-tu}
 TIMEOUT=${TIMEOUT:-180}

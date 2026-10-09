@@ -210,9 +210,19 @@ reach it; `_decompose` now refuses matrices above 12×12.
 
 `_tu_partition` remains as a fallback in three places: a matrix repeated on
 the recursion path, more than 100 nested pivots, and `_find_epsilon` finding
-no R–K path. None has fired in any test or fuzz run since the pivot change
-below; if one does on a large block, the run stalls, as the test is
-exponential.
+no R–K path. They go through `_fallback`, which counts them in
+`_FALLBACKS`; the last testset of the suite checks that the counts did not
+move, and `benchmark/fuzz_cmr.jl` prints them. None has fired since the
+pivot change below. If one does on a large block, the run stalls, as the
+test is exponential — a nonzero count is the first thing to look at.
+
+### Precompilation workload
+The first call in a session used to compile the whole decision procedure,
+about 14 s. A PrecompileTools workload at the end of the module sends one
+small matrix down each route (network and special tests, 1-, 2- and 3-sum
+splits, the pivot cases, the Ghouila-Houri test, non-TU exits, and the
+other public functions); the first call now takes about 10 ms, at the price
+of about 20 s when the package is precompiled.
 
 ### 3-separation search (`_find_three_separation`)
 The search extends the idea of the 2-separation search. Name the sides so
@@ -434,8 +444,11 @@ transpose of the network matrix of K_m plus a vertex of degree 3) by random
 pivots, row and column deletions and entry flips. Small members are checked
 against `_tu_partition` with `_PARTITION_MAX_DIM[] = 0`, which forces the
 search route at every size (1500 inputs in the suite). Members from 21×19
-to 66×64 can only be checked against the CMR binary; that run is not in the
-suite.
+to 66×64 can only be checked against the CMR binary:
+`benchmark/fuzz_cmr.jl`, not in the suite because it needs that binary. CMR
+with default options aborts on a few non-TU inputs (reported upstream,
+October 2026; one such matrix is in the suite as `cmr_abort`), so the
+script repeats a failed run with `--no-simple-3-sepa`.
 
 ### Known test matrices
 - `F_1`, `F_2`: TU, non-network, non-decomposable

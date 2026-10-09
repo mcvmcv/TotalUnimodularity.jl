@@ -125,8 +125,8 @@ The exact Ghouila-Houri partition test, exponential in the smaller
 dimension, remains in two places: for blocks whose smaller dimension is at
 most 8, where it is the faster option, and as a fallback when the
 decomposition cannot proceed (a repeated matrix on the recursion path, more
-than 100 nested pivots, or a 3-sum whose sign cannot be determined). No test
-or fuzz input triggers the fallback on the current code.
+than 100 nested pivots, or a 3-sum whose sign cannot be determined). The
+package counts these fallbacks, and the test suite checks that none occurs.
 
 In practice: matrices that split into small pieces, network matrices and
 3-sums of them are decided in milliseconds at sizes of several hundred rows.
@@ -256,6 +256,10 @@ pivots and scalings) that exercise the decomposition cases. The 2- and
 matrices; 2-sum chains up to 705×704 and 3-sums up to 66×64 are tested end
 to end, and 1500 pivoted, trimmed and perturbed 3-sums are compared with the
 exact test.
+
+Matrices too large for the exact test can be checked against CMR with
+`benchmark/fuzz_cmr.jl`, which needs the `cmr-tu` binary and is therefore
+not part of the suite.
 
 ## Background
 

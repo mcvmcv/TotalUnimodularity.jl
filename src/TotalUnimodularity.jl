@@ -3,6 +3,7 @@ module TotalUnimodularity
 using LinearAlgebra
 using Combinatorics
 using Graphs
+using PrecompileTools: @setup_workload, @compile_workload
 
 # Public API
 export naive_is_totally_unimodular
@@ -1785,6 +1786,20 @@ function cmr_is_totally_unimodular(M::AbstractMatrix{<:Integer}; kwargs...)::Boo
     cmr_is_totally_unimodular(N === nothing ? fill(2, 1, 1) : N; kwargs...)
 end
 
+# How often the decomposition could not proceed and the exact Ghouila-Houri
+# test decided instead: more than 100 nested pivots (`depth`), a matrix
+# repeated on the recursion path (`cycle`), or a 3-sum whose sign ε could not
+# be determined (`epsilon`). None of these is expected on the current code,
+# and the test is exponential, so a nonzero count on a large input explains a
+# stall. The test suite checks that all three stay at zero.
+const _FALLBACKS = (depth = Threads.Atomic{Int}(0), cycle = Threads.Atomic{Int}(0),
+                    epsilon = Threads.Atomic{Int}(0))
+
+function _fallback(M::Matrix{Int}, reason::Symbol)::Bool
+    Threads.atomic_add!(getfield(_FALLBACKS, reason), 1)
+    _tu_partition(M)
+end
+
 function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, fast::Bool)::Bool
     ok, M = _reduce(M)
     ok || return false
@@ -1792,7 +1807,7 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, fa
     # `depth` counts pivot steps (Cases 5/6) only: every sum case recurses on
     # strictly smaller matrices, so only pivots can run away. Runaway
     # recursion says nothing about M; decide it exactly instead.
-    depth > 100 && return _tu_partition(M)
+    depth > 100 && return _fallback(M, :depth)
 
     # 1-sum: split into connected components and test each independently.
     # O(m·n) bipartite BFS — far cheaper than any subsequent step.
@@ -1809,7 +1824,7 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, fa
     # rank-2 pivot), so decide M exactly with the Ghouila-Houri test instead.
     # Each matrix is removed once its subtree is done — identical matrices in
     # sibling branches (e.g. duplicate blocks of a 1-sum) are legitimate.
-    M in seen && return _tu_partition(M)
+    M in seen && return _fallback(M, :cycle)
     push!(seen, M)
     result = _is_tu_irreducible(M, depth, seen, fast)
     delete!(seen, M)
@@ -1969,7 +1984,7 @@ function _apply_decomposition(M::Matrix{Int},
         ok1, ε₁ = _find_epsilon(A_norm, B_rows, C_cols)
         ok2, ε₂ = _find_epsilon(D_norm, C_rows, B_cols)
         # No R–K path means ε is undetermined, not that M is non-TU.
-        (ok1 && ok2) || return _tu_partition(M)
+        (ok1 && ok2) || return _fallback(M, :epsilon)
         nR     = length(B_rows)
         nK     = length(C_cols)
         nnotR  = length(notB_rows)
@@ -2291,6 +2306,58 @@ function cmr_is_totally_unimodular(M::Matrix{Int};
         return _tu_eulerian(M)
     else
         return _tu_partition(M)
+    end
+end
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Precompilation workload
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Without this the first call of a session compiles the whole decision
+# procedure, about 14 s. The workload sends one small matrix down each route:
+# network and special-matrix tests, 1-, 2- and 3-sum splits, the pivot cases,
+# the Ghouila-Houri test, non-TU exits, and the other public entry points.
+@setup_workload begin
+    K33 = [1 1 0 0; 1 1 1 0; 1 0 0 -1; 0 1 1 1; 0 0 1 1]
+    K33d = [1 1 1 0 0; 1 1 0 1 0; 0 1 0 1 1; 0 0 -1 1 1]
+    odd_cycle = [1 1 0; 1 0 1; 0 1 1]
+    # 3-sum of the network matrix of K_6 with the transpose of the network
+    # matrix of K_6 plus a vertex of degree 3 (15×13): no 2-separation, and
+    # neither a network matrix nor the transpose of one.
+    A = let cols = Vector{Int}[]
+        for u in 2:6, v in u+1:6
+            (u, v) == (2, 6) && continue
+            x = zeros(Int, 5); x[u-1] = 1; x[v-1] = -1; push!(cols, x)
+        end
+        x = zeros(Int, 5); x[1] = -1; push!(cols, x)
+        y = copy(x); y[5] = 1; push!(cols, y)
+        reduce(hcat, cols)
+    end
+    B = let cols = Vector{Int}[]
+        x = zeros(Int, 6); x[1] = 1; x[3] = -1; push!(cols, x)
+        x = zeros(Int, 6); x[1] = 1; x[2] = 1; push!(cols, x)
+        for v in 3:6; x = zeros(Int, 6); x[1] = 1; x[2] = 1; x[v] = -1; push!(cols, x); end
+        for u in 3:6, v in u+1:6; x = zeros(Int, 6); x[u] = -1; x[v] = 1; push!(cols, x); end
+        Matrix{Int}(reduce(hcat, cols)')
+    end
+    @compile_workload begin
+        S3 = three_sum(A, B)
+        Bbad = copy(B); Bbad[2:4, 3:5] = odd_cycle
+        for M in (K33, F_1, F_2, odd_cycle, one_sum(K33, K33d), two_sum(K33, K33d),
+                  two_sum(two_sum(K33, K33d), K33), S3, Matrix{Int}(S3'), pivot(S3, 1),
+                  three_sum(A, Bbad))
+            is_totally_unimodular(M)
+        end
+        is_totally_unimodular(Int8.(K33))
+        is_totally_unimodular(odd_cycle .!= 0)
+        naive_is_totally_unimodular(K33)
+        naive_is_totally_unimodular(odd_cycle)
+        for alg in (:decomposition, :eulerian, :partition)
+            cmr_is_totally_unimodular(two_sum(K33, K33d); algorithm = alg)
+            cmr_is_totally_unimodular(odd_cycle; algorithm = alg)
+        end
+        cmr_is_totally_unimodular(F_2)
     end
 end
 
