@@ -1055,6 +1055,19 @@ function _find_two_separation(M::Matrix{Int})::Union{Nothing, Tuple{Vector{Int},
     return nothing
 end
 
+# A digraph on the rows (as i) and columns (as m + j) of an m×n matrix in
+# which every edge joins a row to a column or a column to a row, as adjacency
+# lists in compressed form: row r points to the columns
+# rowadj[rowptr[r]:rowptr[r+1]-1], column c to the rows
+# coladj[colptr[c]:colptr[c+1]-1]. Repeated entries are allowed.
+struct _RuleGraph
+    rowptr::Vector{Int}
+    rowadj::Vector{Int}
+    colptr::Vector{Int}
+    coladj::Vector{Int}
+end
+_RuleGraph(m::Int, n::Int) = _RuleGraph(zeros(Int, m + 1), Int[], zeros(Int, n + 1), Int[])
+
 # Workspace for _rule_sccs!.
 struct _SccWork
     order::Vector{Int}
@@ -1069,49 +1082,35 @@ end
 _SccWork(N::Int) = _SccWork(Int[], Int[], Vector{Int}(undef, N), Vector{Int}(undef, N),
                             Vector{Int}(undef, N), falses(N), Int[], Int[])
 
-# Strongly connected components (Tarjan's algorithm, iterative) of a digraph
-# on the rows (as i) and columns (as m + j) of an m×n matrix, in which every
-# edge joins a row to a column or a column to a row: `rowedge(r, c)` says
-# whether row r points to column c, `coledge(c, r)` whether column c points
-# to row r. Nodes with `skip[v]` set are left out. On return `w.order` holds
-# the nodes component by component, successors first, and `w.ends` the
-# position in `w.order` at which each component ends — so every prefix of
-# `w.order` that stops at a component boundary is closed under the edges.
-#
-# The predicates are only evaluated where an edge is possible: row r can only
-# point to the columns in `row_sup[r]` and in `extra_cols`, column c only to
-# the rows in `col_sup[c]` and in `extra_rows`. For the rules used here that
-# is the support of the row or column plus the supports of the fixed rows or
-# columns, which keeps one pass near O(nnz) on sparse matrices.
-function _rule_sccs!(w::_SccWork, m::Int, n::Int, skip::BitVector,
-                     rowedge::F, coledge::G,
-                     row_sup::Vector{Vector{Int}}, extra_cols::Vector{Int},
-                     col_sup::Vector{Vector{Int}}, extra_rows::Vector{Int}) where {F, G}
+# Strongly connected components (Tarjan's algorithm, iterative) of `g`, with
+# the nodes that have `skip[v]` set left out. On return `w.order` holds the
+# nodes component by component, successors first, and `w.ends` the position
+# in `w.order` at which each component ends — so every prefix of `w.order`
+# that stops at a component boundary is closed under the edges.
+function _rule_sccs!(w::_SccWork, g::_RuleGraph, m::Int, n::Int, skip::BitVector)
     index, low, pos, onstack, stack, calls = w.index, w.low, w.pos, w.onstack, w.stack, w.calls
+    rowptr, rowadj, colptr, coladj = g.rowptr, g.rowadj, g.colptr, g.coladj
     fill!(index, 0)
     empty!(w.order); empty!(w.ends); empty!(stack); empty!(calls)
     counter = 0
     @inbounds for root in 1:m+n
         (skip[root] || index[root] != 0) && continue
         index[root] = low[root] = (counter += 1)
-        pos[root] = 0
+        pos[root] = root <= m ? rowptr[root] : colptr[root - m]
         push!(stack, root); onstack[root] = true
         push!(calls, root)
         while !isempty(calls)
             v = calls[end]
             descended = false
-            own = v <= m ? row_sup[v] : col_sup[v - m]
-            extra = v <= m ? extra_cols : extra_rows
-            lim = length(own) + length(extra)
+            lim = v <= m ? rowptr[v + 1] : colptr[v - m + 1]
             while pos[v] < lim
-                k = (pos[v] += 1)
-                x = k <= length(own) ? own[k] : extra[k - length(own)]
-                u = v <= m ? m + x : x
+                k = pos[v]
+                pos[v] = k + 1
+                u = v <= m ? m + rowadj[k] : coladj[k]
                 skip[u] && continue
-                (v <= m ? rowedge(v, x) : coledge(v - m, x)) || continue
                 if index[u] == 0
                     index[u] = low[u] = (counter += 1)
-                    pos[u] = 0
+                    pos[u] = u <= m ? rowptr[u] : colptr[u - m]
                     push!(stack, u); onstack[u] = true
                     push!(calls, u)
                     descended = true
@@ -1140,16 +1139,19 @@ end
 # After _rule_sccs!: a set of nodes that is closed under the edges, has at
 # least `lo` and at most `hi` nodes and satisfies `accept`, as a vector, or
 # `nothing` if none is found. Prefixes of `w.order` are tried first, nearest
-# to the middle of the range first. If no prefix fits, all unions of components are
-# checked, provided there are at most 12 components: with lo = 2 and hi two
-# less than the number of nodes, as _find_three_separation calls it, a miss
-# means every prefix has 1 node or all but 1, so there are at most three.
-function _closed_set(w::_SccWork, m::Int, n::Int, skip::BitVector, lo::Int, hi::Int,
-                     rowedge::F, coledge::G, accept::H) where {F, G, H}
+# to the middle of the range first. If no prefix fits, all unions of
+# components are checked, provided there are at most 12 components: with
+# lo = 2 and hi two less than the number of nodes, as _find_three_separation
+# calls it, a miss means every prefix has 1 node or all but 1, so there are
+# at most three.
+function _closed_set(w::_SccWork, g::_RuleGraph, m::Int, n::Int, skip::BitVector,
+                     lo::Int, hi::Int, accept::H) where {H}
     order, ends = w.order, w.ends
     lo > hi && return nothing
-    fits = [e for e in ends if lo <= e <= hi]
-    if !isempty(fits)
+    k = length(ends)
+    k < 2 && return nothing                  # strongly connected
+    if any(e -> lo <= e <= hi, ends)
+        fits = [e for e in ends if lo <= e <= hi]
         for e in sort!(fits; by = e -> abs(2e - lo - hi))
             set = order[1:e]
             accept(set) && return set
@@ -1159,8 +1161,7 @@ function _closed_set(w::_SccWork, m::Int, n::Int, skip::BitVector, lo::Int, hi::
 
     # No prefix fits. Unions of components that are not prefixes can still be
     # closed (two components with no edge between them, say).
-    k = length(ends)
-    (k < 2 || k > 12) && return nothing
+    k > 12 && return nothing
     comp = zeros(Int, m + n)
     let c = 1
         for (pos, v) in enumerate(order)
@@ -1172,14 +1173,14 @@ function _closed_set(w::_SccWork, m::Int, n::Int, skip::BitVector, lo::Int, hi::
     succ = zeros(UInt, k)                # components each component points into
     @inbounds for v in order
         if v <= m
-            for c in 1:n
-                (skip[m + c] || !rowedge(v, c)) && continue
-                succ[comp[v]] |= UInt(1) << (comp[m + c] - 1)
+            for q in g.rowptr[v]:g.rowptr[v+1]-1
+                u = m + g.rowadj[q]
+                skip[u] || (succ[comp[v]] |= UInt(1) << (comp[u] - 1))
             end
         else
-            for r in 1:m
-                (skip[r] || !coledge(v - m, r)) && continue
-                succ[comp[v]] |= UInt(1) << (comp[r] - 1)
+            for q in g.colptr[v-m]:g.colptr[v-m+1]-1
+                u = g.coladj[q]
+                skip[u] || (succ[comp[v]] |= UInt(1) << (comp[u] - 1))
             end
         end
     end
@@ -1199,41 +1200,35 @@ end
 
 # Spanning forest of the bipartite graph on the rows other than `i0` and the
 # columns other than `j0` of an m×n matrix whose edges are the pairs (r, c)
-# with `edge(r, c)`. Returns the forest edges and the component number of
-# every row and column (0 for i0 and j0).
-function _rule_forest(m::Int, n::Int, i0::Int, j0::Int, edge::F) where {F}
-    forest = Tuple{Int,Int}[]
-    rcomp = zeros(Int, m)
-    ccomp = zeros(Int, n)
-    queue = Int[]                        # rows as i, columns as m + j
-    k = 0
-    @inbounds for start in 1:m+n
-        if start <= m
-            (start == i0 || rcomp[start] != 0) && continue
-            rcomp[start] = (k += 1)
-        else
-            (start - m == j0 || ccomp[start - m] != 0) && continue
-            ccomp[start - m] = (k += 1)
+# with `edge(r, c)`. Edges listed in `preferred` are taken first. Returns the
+# forest edges and the component of every row and of every column, as the
+# representative node of a union-find structure (rows as i, columns as
+# m + j).
+function _rule_forest(m::Int, n::Int, i0::Int, j0::Int, edge::F,
+                      preferred::Vector{Tuple{Int,Int}}) where {F}
+    parent = collect(1:m+n)
+    function find(x)
+        @inbounds while parent[x] != x
+            parent[x] = parent[parent[x]]
+            x = parent[x]
         end
-        empty!(queue); push!(queue, start)
-        head = 0
-        while head < length(queue)
-            v = queue[head += 1]
-            if v <= m
-                for c in 1:n
-                    (c == j0 || ccomp[c] != 0 || !edge(v, c)) && continue
-                    ccomp[c] = k; push!(queue, m + c); push!(forest, (v, c))
-                end
-            else
-                c = v - m
-                for r in 1:m
-                    (r == i0 || rcomp[r] != 0 || !edge(r, c)) && continue
-                    rcomp[r] = k; push!(queue, r); push!(forest, (r, c))
-                end
-            end
-        end
+        x
     end
-    forest, rcomp, ccomp
+    forest = Tuple{Int,Int}[]
+    function join!(r, c)
+        (r == i0 || c == j0 || !edge(r, c)) && return
+        a = find(r); b = find(m + c)
+        a == b && return
+        @inbounds parent[a] = b
+        push!(forest, (r, c))
+    end
+    for (r, c) in preferred
+        join!(r, c)
+    end
+    for c in 1:n, r in 1:m
+        join!(r, c)
+    end
+    forest, [find(r) for r in 1:m], [find(m + c) for c in 1:n]
 end
 
 """
@@ -1293,6 +1288,12 @@ all sit in rows that are nonzero in column j1 and columns that are nonzero
 in row i1. That leaves about m + n candidates per (i1, j1) and
 O((m + n)² · m · n) work in all, where trying every candidate
 (`exhaustive = true`, kept for cross-checking) is O((m + n) · (m·n)²).
+
+The forest is built from the spanning tree's own edges where possible, and a
+candidate (i2, j2) that is a tree edge tried before (i1, j1) is skipped: with
+the two exchanged it describes the same pair of fixed entries, which the
+earlier pass then covers, or defers in turn to a still earlier one. That
+halves the work when there is no separation.
 """
 function _find_three_separation(M::Matrix{Int}; accept::A = (R1, C1) -> true,
                                 exhaustive::Bool = false
@@ -1304,20 +1305,64 @@ function _find_three_separation(M::Matrix{Int}; accept::A = (R1, C1) -> true,
     skip = falses(N)
     row_sup = [findall(!iszero, @view M[r, :]) for r in 1:m]
     col_sup = [findall(!iszero, @view M[:, c]) for c in 1:n]
-    no_extra = Int[]
     hi = N - 6                               # nodes: N - 4; at least 2 stay out
     rows_of(set) = [v for v in set if v <= m]
     cols_of(set) = [v - m for v in set if v > m]
 
-    for (i1, j1) in _two_separation_pivots(M)
+    # The rules are written out as adjacency lists before each search. A rule
+    # between row r and column c can only fire where an entry is nonzero in
+    # row r or in the fixed row, and in column c or in the fixed column, so a
+    # list is built from the supports of the two, in time proportional to
+    # their sizes.
+    g1 = _RuleGraph(m, n)                    # rank B = rank C = 1
+    g2 = _RuleGraph(m, n)                    # rank B = 2, C = 0
+    S = Matrix{Int}(undef, m, n)             # Schur complement of (i1, j1), times p
+    S_sup = [Int[] for _ in 1:m]             # supports of its rows
+
+    # Second kind, column rule: a column points to the rows of its support,
+    # whatever is fixed.
+    for c in 1:n
+        g2.colptr[c] = length(g2.coladj) + 1
+        append!(g2.coladj, col_sup[c])
+    end
+    g2.colptr[n + 1] = length(g2.coladj) + 1
+
+    pivots = _two_separation_pivots(M)
+    turn = zeros(Int, m, n)                  # position of each pivot in the order tried
+    for (t, (i, j)) in enumerate(pivots)
+        turn[i, j] = t
+    end
+    # A candidate that had its own turn as (i1, j1) before t1 is skipped.
+    done_before(i2, j2, t1) = !exhaustive && 0 < turn[i2, j2] < t1
+
+    @inbounds for (t1, (i1, j1)) in enumerate(pivots)
         p = M[i1, j1]
 
-        # rank B = rank C = 1: (i2, j2) a nonzero of C, i2 on side 2, j2 on side 1.
+        # ── rank B = rank C = 1: (i2, j2) a nonzero of C, i2 on side 2, j2 on
+        # side 1.
+        # Row rule, which depends on (i1, j1) only: row r points to column c
+        # when p·M[r,c] ≠ M[r,j1]·M[i1,c].
+        empty!(g1.rowadj)
+        for r in 1:m
+            g1.rowptr[r] = length(g1.rowadj) + 1
+            a = M[r, j1]
+            for c in row_sup[r]
+                p * M[r, c] != a * M[i1, c] && push!(g1.rowadj, c)
+            end
+            if a != 0
+                for c in row_sup[i1]
+                    M[r, c] == 0 && push!(g1.rowadj, c)
+                end
+            end
+        end
+        g1.rowptr[m + 1] = length(g1.rowadj) + 1
+
         seeds = if exhaustive
             [(i, j) for j in 1:n for i in 1:m if i != i1 && j != j1 && M[i, j] != 0]
         else
             in_B = (r, c) -> M[r, j1] != 0 && M[i1, c] != 0 && p * M[r, c] == M[r, j1] * M[i1, c]
-            forest, rcomp, ccomp = _rule_forest(m, n, i1, j1, (r, c) -> M[r, c] != 0 && !in_B(r, c))
+            forest, rcomp, ccomp = _rule_forest(m, n, i1, j1,
+                                                (r, c) -> M[r, c] != 0 && !in_B(r, c), pivots)
             for c in 1:n, r in 1:m
                 (r == i1 || c == j1 || M[r, c] == 0 || rcomp[r] == ccomp[c]) && continue
                 in_B(r, c) && push!(forest, (r, c))
@@ -1325,46 +1370,94 @@ function _find_three_separation(M::Matrix{Int}; accept::A = (R1, C1) -> true,
             forest
         end
         for (i2, j2) in seeds
+            done_before(i2, j2, t1) && continue
             q = M[i2, j2]
-            fill!(skip, false)
+            # Column rule: column c points to row r when
+            # q·M[r,c] ≠ M[r,j2]·M[i2,c].
+            empty!(g1.coladj)
+            for c in 1:n
+                g1.colptr[c] = length(g1.coladj) + 1
+                b = M[i2, c]
+                for r in col_sup[c]
+                    q * M[r, c] != M[r, j2] * b && push!(g1.coladj, r)
+                end
+                if b != 0
+                    for r in col_sup[j2]
+                        M[r, c] == 0 && push!(g1.coladj, r)
+                    end
+                end
+            end
+            g1.colptr[n + 1] = length(g1.coladj) + 1
+
             skip[i1] = skip[i2] = skip[m + j1] = skip[m + j2] = true
-            rowedge = (r, c) -> @inbounds p * M[r, c] != M[r, j1] * M[i1, c]
-            coledge = (c, r) -> @inbounds q * M[r, c] != M[r, j2] * M[i2, c]
-            _rule_sccs!(w, m, n, skip, rowedge, coledge,
-                        row_sup, row_sup[i1], col_sup, col_sup[j2])
+            _rule_sccs!(w, g1, m, n, skip)
+            if length(w.ends) < 2                # strongly connected
+                skip[i1] = skip[i2] = skip[m + j1] = skip[m + j2] = false
+                continue
+            end
             side = set -> (sort!([i1; rows_of(set)]), sort!([j2; cols_of(set)]))
-            set = _closed_set(w, m, n, skip, 2, hi, rowedge, coledge, set -> accept(side(set)...))
+            set = _closed_set(w, g1, m, n, skip, 2, hi, set -> accept(side(set)...))
             set !== nothing && return side(set)
+            skip[i1] = skip[i2] = skip[m + j1] = skip[m + j2] = false
         end
 
-        # rank B = 2, C = 0: rows i1, i2 on side 1, columns j1, j2 on side 2.
-        schur = (r, c) -> p * M[r, c] - M[r, j1] * M[i1, c]
+        # ── rank B = 2, C = 0: rows i1, i2 on side 1, columns j1, j2 on side 2.
+        # The 3×3 minor on rows i1, i2, r and columns j1, j2, c is, up to the
+        # factor p, the 2×2 minor on rows i2, r and columns j2, c of the
+        # Schur complement S of (i1, j1). Row i1 and column j1 of S are zero.
+        for r in 1:m
+            empty!(S_sup[r])
+        end
+        for c in 1:n
+            t = M[i1, c]
+            for r in 1:m
+                x = p * M[r, c] - M[r, j1] * t
+                S[r, c] = x
+                x != 0 && push!(S_sup[r], c)
+            end
+        end
+
         seeds = if exhaustive
-            [(i, j) for j in 1:n for i in 1:m if i != i1 && j != j1 && schur(i, j) != 0]
+            [(i, j) for j in 1:n for i in 1:m if i != i1 && j != j1 && S[i, j] != 0]
         else
-            forest, rcomp, ccomp = _rule_forest(m, n, i1, j1, (r, c) -> M[r, c] != 0 && schur(r, c) != 0)
+            forest, rcomp, ccomp = _rule_forest(m, n, i1, j1,
+                                                (r, c) -> M[r, c] != 0 && S[r, c] != 0, pivots)
             for c in 1:n, r in 1:m
                 (r == i1 || c == j1 || M[r, c] != 0 || rcomp[r] == ccomp[c]) && continue
-                schur(r, c) != 0 && push!(forest, (r, c))
+                S[r, c] != 0 && push!(forest, (r, c))
             end
             forest
         end
         for (i2, j2) in seeds
-            x11, x12, x21, x22 = p, M[i1, j2], M[i2, j1], M[i2, j2]
-            d = x11 * x22 - x12 * x21
-            fill!(skip, false)
+            done_before(i2, j2, t1) && continue
+            x = S[i2, j2]
+            # Row rule: row r points to column c when
+            # x·S[r,c] ≠ S[r,j2]·S[i2,c].
+            empty!(g2.rowadj)
+            for r in 1:m
+                g2.rowptr[r] = length(g2.rowadj) + 1
+                a = S[r, j2]
+                for c in S_sup[r]
+                    x * S[r, c] != a * S[i2, c] && push!(g2.rowadj, c)
+                end
+                if a != 0
+                    for c in S_sup[i2]
+                        S[r, c] == 0 && push!(g2.rowadj, c)
+                    end
+                end
+            end
+            g2.rowptr[m + 1] = length(g2.rowadj) + 1
+
             skip[i1] = skip[i2] = skip[m + j1] = skip[m + j2] = true
-            # 3×3 minor on rows i1, i2, r and columns j1, j2, c, expanded
-            # along the last row and column.
-            rowedge = (r, c) -> @inbounds M[r, c] * d !=
-                M[r, j1] * (x22 * M[i1, c] - x12 * M[i2, c]) +
-                M[r, j2] * (x11 * M[i2, c] - x21 * M[i1, c])
-            coledge = (c, r) -> @inbounds M[r, c] != 0
-            _rule_sccs!(w, m, n, skip, rowedge, coledge,
-                        row_sup, vcat(row_sup[i1], row_sup[i2]), col_sup, no_extra)
+            _rule_sccs!(w, g2, m, n, skip)
+            if length(w.ends) < 2                # strongly connected
+                skip[i1] = skip[i2] = skip[m + j1] = skip[m + j2] = false
+                continue
+            end
             side = set -> (sort!([i1; i2; rows_of(set)]), sort!(cols_of(set)))
-            set = _closed_set(w, m, n, skip, 2, hi, rowedge, coledge, set -> accept(side(set)...))
+            set = _closed_set(w, g2, m, n, skip, 2, hi, set -> accept(side(set)...))
             set !== nothing && return side(set)
+            skip[i1] = skip[i2] = skip[m + j1] = skip[m + j2] = false
         end
     end
     return nothing
@@ -1757,11 +1850,14 @@ function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, 
         end
     end
 
-    # Quick non-TU detector: Eulerian check at k ≤ 3 catches most violations
-    # (e.g. any 2×2 or 3×3 bad submatrix) before the exponential searches
-    # run. It costs O(m³n³) in the worst case, so it runs after the 2-sum
-    # split: on a splittable matrix only the pieces pay for it.
-    _tu_eulerian(M, 3) || return false
+    # Quick non-TU detector: the Eulerian check at k ≤ 3 finds any 2×2 or 3×3
+    # violation, which settles most non-TU inputs without a separation
+    # search. It runs after the 2-sum split, so that on a splittable matrix
+    # only the pieces pay for it, and under a work budget: on a dense matrix
+    # the 3×3 pass is O(m³n³) and used to cost far more than the search it
+    # is meant to save (0.7 s of a 0.9 s run on a dense 66×62 TU block).
+    # Running out of budget only means the search below decides instead.
+    _tu_eulerian(M, 3; budget = 4 * m * n * (m + n)) || return false
 
     if !legacy
         # Small blocks: the exact branch-and-prune Ghouila-Houri test is
@@ -2051,9 +2147,14 @@ end
 # even number of nonzeros.
 # ──────────────────────────────────────────────────────────────────────────────
 
-function _tu_eulerian(M::Matrix{Int}, max_k::Int = typemax(Int))::Bool
+function _tu_eulerian(M::Matrix{Int}, max_k::Int = typemax(Int);
+                      budget::Int = typemax(Int))::Bool
     r, c = size(M)
-    r > c && return _tu_eulerian(Matrix{Int}(M'), max_k)
+    r > c && return _tu_eulerian(Matrix{Int}(M'), max_k; budget)
+    # With a budget the search gives up — returning true, "no violation
+    # found" — after about that many steps (submatrices examined plus columns
+    # scanned). Only meaningful for a pre-filter: `false` is always definite.
+    work = Ref(budget)
 
     # Build CSR sparse row structure (column indices only — no values needed here).
     # Iterating only over nonzeros mirrors the CSR format used by C CMR.
@@ -2080,6 +2181,7 @@ function _tu_eulerian(M::Matrix{Int}, max_k::Int = typemax(Int))::Bool
             first = n_sel == 0 ? 1 : col_sel[n_sel] + 1
             last  = n_use - (k - n_sel) + 1
             for u in first:last
+                work[] < 0 && return true
                 col = use_cols[u]
                 for s in 1:k                                    # update row_nz / sum
                     v = M[sub_rows[s], col]
@@ -2096,6 +2198,7 @@ function _tu_eulerian(M::Matrix{Int}, max_k::Int = typemax(Int))::Bool
         else
             # Columns are Eulerian by construction (selected from use_cols).
             # Check whether rows are also Eulerian and sum ≢ 0 mod 4.
+            work[] -= 1
             sum_ent[] % 4 == 0 && return true
             for s in 1:k
                 row_nz[sub_rows[s]] % 2 == 0 || return true    # row not Eulerian → ok
@@ -2110,6 +2213,7 @@ function _tu_eulerian(M::Matrix{Int}, max_k::Int = typemax(Int))::Bool
             first = n_sel == 0 ? 1 : sub_rows[n_sel] + 1
             last  = r - (k - n_sel) + 1
             for row in first:last
+                work[] < 0 && return true
                 sub_rows[n_sel + 1] = row
                 for k2 in row_ptr2[row]+1:row_ptr2[row+1]       # sparse update
                     @inbounds col_nz[row_col2[k2]] += 1; end
@@ -2125,6 +2229,7 @@ function _tu_eulerian(M::Matrix{Int}, max_k::Int = typemax(Int))::Bool
             # ≡ 2 (mod 4) and is nonsingular, so it has no zero column — the
             # criterion stays exact, and sparse matrices lose most candidates.
             n_use = 0
+            work[] -= c
             for j in 1:c
                 if col_nz[j] > 0 && col_nz[j] % 2 == 0; n_use += 1; use_cols[n_use] = j; end
             end

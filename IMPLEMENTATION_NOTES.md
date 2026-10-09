@@ -178,9 +178,15 @@ of a few thousand inputs; see "Structured fuzz" under Testing.
 1. the network, transpose-network and special-matrix tests;
 2. `_find_two_separation` (see below) — on success the block is split with
    `_apply_decomposition` (Case 2) and both pieces recurse from the top;
-3. the Eulerian k ≤ 3 pre-filter. It is O(m³n³) in the worst case, which is
-   why it runs after the split: on a splittable matrix only the pieces pay
-   for it;
+3. the Eulerian k ≤ 3 pre-filter, under a work budget of 4·m·n·(m+n) steps.
+   It finds any 2×2 or 3×3 violation and settles most non-TU inputs; without
+   it, random non-TU matrices each cost a full separation search (45× slower
+   in aggregate on a sample of random 30×30 and 60×60 matrices). It is O(m³n³) on dense matrices, though,
+   so it runs after the 2-sum split, and it stops when the budget is spent:
+   unbudgeted, it took 0.8 s of a 0.9 s run on a dense 66×62 TU block that
+   the search then decided in milliseconds. A spent budget only means the
+   search decides instead. Of the settings measured (no 3×3 pass, and
+   budgets of ¼, 1 and 4 times m·n·(m+n)), the last was fastest overall;
 4. for a block with min(m,n) ≤ 8 (`_PARTITION_MAX_DIM`), the exact
    branch-and-prune Ghouila-Houri test `_tu_partition`. Measured on TU blocks
    with no 2-separation, the search route below is level with it at 8 and
@@ -229,11 +235,31 @@ union of them in range. Usually a prefix of Tarjan's order works; when none
 does there are at most three components and all unions are tried — two
 sinks with no edge between them form a closed set that is not a prefix.
 
-Candidates for (i2, j2) are cut down with a spanning forest, as described in
-the docstring: about m+n per (i1, j1) instead of every nonzero. Rule edges
-are only evaluated on the supports of the row or column and of the fixed
-rows or columns, since they are zero elsewhere. Together these took a
-65×62 matrix with no separation from 5.0 s to 0.9 s.
+When there is no separation — the case that ends in "not TU" — every pair
+of fixed entries has to be tried, so the cost is (number of pairs) × (cost
+of one pass). On a 65×62 matrix with no separation that was 5.0 s at first
+and is 0.17 s now, through four changes:
+
+- Candidates for (i2, j2) are cut down with a spanning forest, as described
+  in the docstring: about m+n per (i1, j1) instead of every nonzero.
+- The rules are written out as adjacency lists (`_RuleGraph`) before each
+  pass instead of being evaluated as predicates inside Tarjan's algorithm.
+  A rule can only fire where an entry is nonzero in the row or the fixed
+  row, and in the column or the fixed column, so a list is built from two
+  supports. The half of the rules that depends on (i1, j1) alone is built
+  once per (i1, j1). For the second kind the Schur complement of (i1, j1)
+  is formed once, which turns the 3×3 minors into 2×2 minors.
+- The forest is built from the spanning tree's own edges first, and a
+  candidate (i2, j2) that is a tree edge with an earlier turn as (i1, j1)
+  is skipped. Exchanged, the two describe the same pair, so the earlier
+  pass covers it — or defers to a still earlier one; the chain ends at a
+  pass whose valid candidate is not earlier, which is tried. This halves
+  the number of passes.
+- No per-pass allocation in the common outcome (one component).
+
+The remaining cost is about (m+n)² passes of Tarjan's algorithm. CMR is
+still several times faster on such inputs, and its advantage grows with
+size.
 
 Correctness matters more here than for the 2-separation search, because "no
 separation" is reported as "not TU". The unit test compares against
