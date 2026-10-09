@@ -286,7 +286,9 @@ partitions (`_decompose`), used as an independent check.
 1. **Performance:** the general separation search of Theorem 20.2 is
    impractical and is not implemented; 2- and 3-separations are found by
    the searches above. The 3-separation search is O((m+n)² · m · n) when there
-   is no separation, well above the cubic bound of Truemper's algorithm.
+   is no separation, and it is repeated on the pieces. Truemper's algorithm
+   is cubic; CMR implements a simplified version that it documents as
+   O((m+n)⁵).
    See IMPLEMENTATION_NOTES.md for the routing and measurements.
 
 2. **Exponential fallback:** the exact Ghouila-Houri test decides blocks of

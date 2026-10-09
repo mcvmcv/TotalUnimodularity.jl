@@ -267,9 +267,12 @@ and is 0.17 s now, through four changes:
   the number of passes.
 - No per-pass allocation in the common outcome (one component).
 
-The remaining cost is about (m+n)² passes of Tarjan's algorithm. CMR is
-still several times faster on such inputs, and its advantage grows with
-size.
+The remaining cost is about (m+n)² passes of Tarjan's algorithm. Measured
+with `benchmark/scaling.jl`, CMR is 2× to 3.5× faster on such inputs up to
+120×118 and 1.3× at 378×376 (29 s against 39 s): it enumerates 3-separation
+candidates there too. Its lead is larger on TU matrices, 8× to 12× from
+276×274 up. CMR documents its regularity test as O((m+n)⁵), a simplified
+version of Truemper's cubic algorithm.
 
 Correctness matters more here than for the 2-separation search, because "no
 separation" is reported as "not TU". The unit test compares against

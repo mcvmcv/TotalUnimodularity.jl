@@ -7,9 +7,9 @@ See [total unimodularity](https://en.wikipedia.org/wiki/Unimodular_matrix#Total_
 
 > **Note:** every step on the default route is polynomial, but with a higher
 > degree than the best known algorithms, and an exact exponential-time test
-> is kept for very small blocks and as a fallback. See
-> [Performance](#performance) for measured limits and a comparison with the
-> CMR library.
+> is kept for very small blocks and as a fallback. For large matrices the
+> [CMR](https://github.com/discopt/cmr) C library is the better tool; see
+> [Performance](#performance) for measured limits and the comparison.
 
 ## What is Total Unimodularity?
 
@@ -128,11 +128,13 @@ decomposition cannot proceed (a repeated matrix on the recursion path, more
 than 100 nested pivots, or a 3-sum whose sign cannot be determined). The
 package counts these fallbacks, and the test suite checks that none occurs.
 
-In practice: matrices that split into small pieces, network matrices and
-3-sums of them are decided in milliseconds at sizes of several hundred rows.
-The slowest inputs measured are large matrices that are not TU but pass the
-cheap pre-filter, where the 3-separation search has to exhaust every
-candidate: about 0.2 s at 65×62.
+In practice: matrices that split into small pieces and network matrices
+are decided in milliseconds to a tenth of a second at sizes of several
+hundred rows. Blocks that need 3-separations cost more: tens of
+milliseconds at 66×64, seconds at 276×274. The slowest inputs are large
+matrices that are not TU but pass the cheap pre-filter, where the
+3-separation search has to try every candidate: about 0.2 s at 66×64, 12 s
+at 276×274.
 
 `cmr_is_totally_unimodular(M; algorithm=:decomposition)` instead runs the
 Seymour decomposition on blocks up to 12×12 with an exhaustive search for
@@ -172,12 +174,30 @@ exponential wall. The naive column was measured earlier than the other.
 ### Benchmark: CMR vs `is_totally_unimodular`
 
 [CMR](https://github.com/discopt/cmr) is a C library with a polynomial-time
-implementation of the full Seymour decomposition. The table compares its
-`cmr-tu` tool (Release build, default decomposition algorithm) with
-`is_totally_unimodular` on the same machine. CMR times are its own reported
-recognition time, excluding process start and file reading; Julia times are
-after JIT warmup. Both gave the same answer on every matrix where both
-finished. `benchmark/run.sh` reproduces the tables.
+implementation of the full Seymour decomposition, a simplified version of
+Truemper's algorithm. **For large matrices, use CMR**: on TU matrices of a
+few hundred rows it is about ten times faster than this package (see
+[Larger matrices](#larger-matrices) below), and it can also return the
+decomposition tree and certificates, where this package only answers yes or
+no. The first two tables stop at sizes where the two are still close, and
+should not be read as saying that this package is the faster one in
+general.
+
+The tables compare CMR's `cmr-tu` tool (Release build, default decomposition
+algorithm) with `is_totally_unimodular` on the same machine. Both gave the
+same answer on every matrix. `benchmark/run.sh` reproduces them.
+
+The two columns are not measured the same way, and the difference favours
+this package on the smallest rows:
+
+- CMR: one run in a fresh process, using the recognition time it reports
+  itself (process start and file reading excluded).
+- This package: the best of several runs in one warm process (21 runs for
+  times under 50 ms, 4 up to 2 s, 1 above), after compilation.
+
+CMR also has a fixed cost of about 0.3 ms per call that does not shrink
+with the matrix (0.30–0.34 ms over ten runs on the 5×4 matrix), which is
+what the first rows of the table mostly show.
 
 | Matrix | Size | TU | CMR | `is_totally_unimodular` |
 |---|---|---|---|---|
@@ -223,15 +243,45 @@ larger ones did not finish.
 | K₁₂ ⊕₃ K₁₂* | 66×64 | true | 38.1 ms | 25.4 ms |
 | the nine above, one entry flipped | 10×8 – 66×64 | false | 0.4 – 37 ms | 0.03 – 5.0 ms |
 
-In short: on small matrices this package wins on constant factors, and on
-the larger ones measured here the two are within a small factor of each
-other in either direction, CMR being ahead on large network matrices (about
-3× at 200×400) and on some of the 3-sum family (2× at 36×34). The table
-does not show this package's worst case: a large matrix that is not TU but
-passes the cheap pre-filter makes the 3-separation search try every
-candidate, about 0.2 s at 65×62 where CMR takes tens of milliseconds, and
-the gap grows with size. CMR's algorithm has the better complexity; prefer it
-for very large instances.
+How to read these numbers:
+
+- **Small matrices** (up to about 20×20): this package is usually faster,
+  by one to two orders of magnitude on the smallest, because of CMR's fixed
+  cost per call. If you test many small matrices from Julia, that matters.
+- **Non-TU matrices with a small violation**: this package is usually
+  faster, because a cheap pre-filter finds any 2×2 or 3×3 violating
+  submatrix before the decomposition starts. On "network, one entry
+  flipped" and the flipped 66×64 matrix, CMR spends its time enumerating
+  3-separation candidates instead.
+- **Larger TU matrices**: within a small factor of each other at these
+  sizes, with CMR ahead where the input offers no shortcut — about 3× on
+  the 200×400 network matrix and 2× on the 36×34 3-sum.
+
+#### Larger matrices
+
+The same 3-sum family at larger sizes (`benchmark/scaling.jl`; single runs,
+so read the ratios as rough): each member as built, after six random
+pivots, and with one entry changed so that it is not TU but still passes
+the pre-filter, which is the worst case for both programs.
+
+| Size | TU: CMR | TU: this package | non-TU: CMR | non-TU: this package |
+|---|---|---|---|---|
+| 36×34 | 1.6 – 1.8 ms | 3.2 – 5.0 ms | 12 ms | 31 ms |
+| 66×64 | 13 – 16 ms | 36 – 66 ms | 60 – 73 ms | 0.20 – 0.21 s |
+| 120×118 | 33 – 189 ms | 0.30 – 0.45 s | 0.50 s | 1.1 s |
+| 190×188 | 0.10 – 1.5 s | 0.28 – 1.0 s | 2.3 s | 4.0 – 4.2 s |
+| 276×274 | 0.24 – 0.34 s | 1.8 – 2.7 s | 9.1 – 9.3 s | 12 s |
+| 378×376 | 0.76 – 0.77 s | 8.8 – 8.9 s | 29 s | 39 s |
+
+On TU matrices CMR's lead grows with size, to between 8× and 12× at
+276×274 and above (with one exception in this sample, the unpivoted 190×188
+matrix, where it took 1.5 s against 0.28 s). On the non-TU worst case the
+two are closer — CMR is 2× to 3.5× ahead up to 120×118 and 1.3× at 378×376
+— and both become slow: half a minute or more at that size.
+
+So: for matrices up to a few dozen rows and columns, or many small ones,
+this package is a reasonable choice and needs no C toolchain. For anything
+larger, and whenever you need the decomposition itself, use CMR.
 
 Rank computations avoid floating-point SVD entirely: the hot paths use
 Float64 Gaussian elimination (exact for the small {-1,0,1} matrices arising
