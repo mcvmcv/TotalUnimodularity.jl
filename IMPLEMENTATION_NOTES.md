@@ -178,14 +178,20 @@ of a few thousand inputs; see "Structured fuzz" under Testing.
 1. the network, transpose-network and special-matrix tests;
 2. `_find_two_separation` (see below) — on success the block is split with
    `_apply_decomposition` (Case 2) and both pieces recurse from the top;
-3. the Eulerian k ≤ 3 pre-filter, under a work budget of 4·m·n·(m+n) steps.
-   It finds any 2×2 or 3×3 violation and settles most non-TU inputs; without
-   it, random non-TU matrices each cost a full separation search (45× slower
-   in aggregate on a sample of random 30×30 and 60×60 matrices). It is O(m³n³) on dense matrices, though,
-   so it runs after the 2-sum split, and it stops when the budget is spent:
-   unbudgeted, it took 0.8 s of a 0.9 s run on a dense 66×62 TU block that
-   the search then decided in milliseconds. A spent budget only means the
-   search decides instead. Of the settings measured (no 3×3 pass, and
+3. the short-cycle pre-filter `_tu_short_cycles`, under a work budget of
+   4·m·n·(m+n) steps. It finds any 2×2 or 3×3 violation and settles most
+   non-TU inputs; without it, random non-TU matrices each cost a full
+   separation search (45× slower in aggregate on a sample of random 30×30
+   and 60×60 matrices). A smallest violation of size 2 or 3 is Eulerian
+   with no zero row, so its support is a 4-cycle or a chordless 6-cycle,
+   and the filter walks those cycles in the support graph. It used to be
+   the Eulerian test `_tu_eulerian` cut off at k = 3, which enumerates row
+   triples and scans every column for each, O(m³n) even on a sparse
+   matrix: on a sparse 378×376 TU block it spent the whole budget, a
+   quarter of the run, and found nothing. The two agree on 200,000 random
+   matrices. On dense matrices both are O(m³n³), hence the budget, and
+   hence the filter runs after the 2-sum split. A spent budget only means
+   the search decides instead. Of the settings measured (no 3×3 pass, and
    budgets of ¼, 1 and 4 times m·n·(m+n)), the last was fastest overall;
 4. for a block with min(m,n) ≤ 8 (`_PARTITION_MAX_DIM`), the exact
    branch-and-prune Ghouila-Houri test `_tu_partition`. Measured on TU blocks
@@ -267,12 +273,36 @@ and is 0.17 s now, through four changes:
   the number of passes.
 - No per-pass allocation in the common outcome (one component).
 
-The remaining cost is about (m+n)² passes of Tarjan's algorithm. Measured
-with `benchmark/scaling.jl`, CMR is 2× to 3.5× faster on such inputs up to
-120×118 and 1.3× at 378×376 (29 s against 39 s): it enumerates 3-separation
-candidates there too. Its lead is larger on TU matrices, 8× to 12× from
-276×274 up. CMR documents its regularity test as O((m+n)⁵), a simplified
-version of Truemper's cubic algorithm.
+A later round (October 2026) took another 1.25× off this case and much more
+off TU matrices:
+
+- Most of the rule lists that depend on (i2, j2) do not: a column that is
+  zero in row i2 points to the rows of its own support, and in the second
+  kind a row that is zero in column j2 of S points to its support in S.
+  These are written once (per search, or per (i1, j1)), and each pass
+  overrides only the lists of the few rows or columns that differ
+  (`_override!`, `_restore!`), where it used to rewrite all of them.
+- `skip` and `onstack` are `Vector{Bool}` rather than `BitVector`; the
+  bit extraction was a sixth of the pass.
+- On a TU matrix the search stops at the first (i1, j1) that crosses the
+  separation, and in breadth-first order the crossing tree edges come in
+  runs: on the K_n ⊕₃ K_m* family, 5–10% of the tree, at positions 47–67
+  of 549, say. `_spread` reorders the tree edges by a stride near L/φ, which
+  brought the number of (i1, j1) tried at 378×376 from 33–73 to 2–6 on most
+  instances (it can also be unlucky: 3 to 90 on one). A first version
+  computed the stride inside the search, and the closure over a reassigned
+  variable boxed it and made the whole loop type-unstable, 1.5× slower;
+  hence the helper function.
+
+The remaining cost is about (m+n)² passes of Tarjan's algorithm when there
+is no separation. Measured with `benchmark/scaling.jl`, CMR is 1.6× to 2.7×
+faster on such inputs up to 120×118 and 1.1× to 1.6× from 190×188 to
+378×376 (18 s against 23 s at the largest): it enumerates 3-separation
+candidates there too. On TU matrices of the family the two are now level
+within a factor of about 2 either way (0.40 s against 0.76 s at 378×376,
+unpivoted; 0.57 s against 0.41 s pivoted); before this round CMR was 8× to
+12× faster from 276×274 up. CMR documents its regularity test as
+O((m+n)⁵), a simplified version of Truemper's cubic algorithm.
 
 Correctness matters more here than for the 2-separation search, because "no
 separation" is reported as "not TU". The unit test compares against
@@ -310,9 +340,13 @@ minor on rows {i0, r}, columns {j0, c} is nonzero (keeps M[R1, C2] rank 1).
 The rules are the edges of a digraph on the other m+n-2 rows and columns,
 and a 2-separation with that pivot exists iff the digraph is not strongly
 connected: any nonempty proper closed set is a valid side 1. One pass of
-Tarjan's algorithm per pivot (`_two_separation_sccs!`) finds the strongly
-connected components, successors first, so every prefix of that order ending
-at a component boundary is a closed set.
+Tarjan's algorithm per pivot finds the strongly connected components,
+successors first, so every prefix of that order ending at a component
+boundary is a closed set. The rules are written as adjacency lists from the
+row and column supports, with the same `_RuleGraph` and `_rule_sccs!` as
+the 3-separation search; an earlier version evaluated them over dense rows
+and columns, O(m·n) per pivot, which on a 3-connected 378×376 block (all
+pivots tried, none succeeding) was half the run.
 
 Only the edges of a spanning tree of the support graph are tried as pivots
 (`_two_separation_pivots`): the two sides of a 2-separation of a connected
@@ -380,7 +414,7 @@ huge matrix to the exponential test. The sum cases (1–4) always recurse on str
 matrices and cannot run away, so only the pivot cases (5/6) increment
 `depth` now.
 
-### Eulerian filter skips zero columns
+### Eulerian test skips zero columns
 For a fixed row subset, `_tu_eulerian` only considers columns with an even
 and *nonzero* number of nonzeros in those rows. A minimal non-TU submatrix
 is nonsingular, so it has no zero column; the criterion stays exact and

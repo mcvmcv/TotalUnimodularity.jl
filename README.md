@@ -7,9 +7,11 @@ See [total unimodularity](https://en.wikipedia.org/wiki/Unimodular_matrix#Total_
 
 > **Note:** every step on the default route is polynomial, but with a higher
 > degree than the best known algorithms, and an exact exponential-time test
-> is kept for very small blocks and as a fallback. For large matrices the
-> [CMR](https://github.com/discopt/cmr) C library is the better tool; see
-> [Performance](#performance) for measured limits and the comparison.
+> is kept for very small blocks and as a fallback. On the hardest large
+> inputs the [CMR](https://github.com/discopt/cmr) C library is still
+> faster, and it can return the decomposition and certificates, where this
+> package only answers yes or no; see [Performance](#performance) for
+> measured limits and the comparison.
 
 ## What is Total Unimodularity?
 
@@ -130,10 +132,10 @@ package counts these fallbacks, and the test suite checks that none occurs.
 
 In practice: matrices that split into small pieces and network matrices
 are decided in milliseconds to a tenth of a second at sizes of several
-hundred rows. Blocks that need 3-separations cost more: tens of
-milliseconds at 66×64, seconds at 276×274. The slowest inputs are large
+hundred rows. Blocks that need 3-separations cost more: a few milliseconds
+at 66×64, a few tenths of a second at 276×274. The slowest inputs are large
 matrices that are not TU but pass the cheap pre-filter, where the
-3-separation search has to try every candidate: about 0.2 s at 66×64, 12 s
+3-separation search has to try every candidate: about 0.16 s at 66×64, 10 s
 at 276×274.
 
 `cmr_is_totally_unimodular(M; algorithm=:decomposition)` instead runs the
@@ -156,15 +158,15 @@ The "path" column shows which stage of the algorithm decides the answer.
 | F₁ | 5×5 | true | 29 µs | 8.7 µs | special matrix (F₁/F₂) |
 | R10 | 5×5 | true | 25 µs | 487 µs | special matrix (F₁/F₂) |
 | R12 | 6×6 | true | 171 µs | 77 µs | Ghouila-Houri |
-| Fano | 3×4 | false | 6 µs | 11 µs | Eulerian k≤3 filter |
+| Fano | 3×4 | false | 6 µs | 11 µs | 2×2/3×3 pre-filter |
 | one_sum(K₃₃, K₃₃) | 10×8 | true | 11.7 ms | 26 µs | 1-sum component split |
 | two_sum(K₃₃, K₃₃ᵈ) | 8×8 | true | 3.2 ms | 61 µs | 2-sum split |
-| CMR Eulerian test | 12×12 | false | 1.4 s | 1.4 ms | no 3-separation |
-| CMR partition test | 14×14 | false | 15.7 s | 3.5 ms | no 3-separation |
+| CMR Eulerian test | 12×12 | false | 1.4 s | 1.0 ms | no 3-separation |
+| CMR partition test | 14×14 | false | 15.7 s | 1.7 ms | no 3-separation |
 | 2-sum chain | 15×15 | true | — (infeasible) | 0.24 ms | 2-sum split |
 | 2-sum chain | 22×22 | true | — (infeasible) | 0.39 ms | 2-sum split |
 | 2-sum chain | 145×144 | true | — (infeasible) | 6.5 ms | 2-sum split |
-| 2-sum chain | 705×704 | true | — (infeasible) | 0.11 s | 2-sum split |
+| 2-sum chain | 705×704 | true | — (infeasible) | 0.09 – 0.13 s | 2-sum split |
 
 The naive checker and `is_totally_unimodular` are level on the very
 smallest matrices; `is_totally_unimodular` pulls ahead from about 5×5 (R10
@@ -175,13 +177,13 @@ exponential wall. The naive column was measured earlier than the other.
 
 [CMR](https://github.com/discopt/cmr) is a C library with a polynomial-time
 implementation of the full Seymour decomposition, a simplified version of
-Truemper's algorithm. **For large matrices, use CMR**: on TU matrices of a
-few hundred rows it is about ten times faster than this package (see
-[Larger matrices](#larger-matrices) below), and it can also return the
-decomposition tree and certificates, where this package only answers yes or
-no. The first two tables stop at sizes where the two are still close, and
-should not be read as saying that this package is the faster one in
-general.
+Truemper's algorithm. It can also return the decomposition tree and
+certificates, where this package only answers yes or no. On the inputs
+below the two are within a small factor of each other in either direction,
+and on the hardest large inputs, non-TU matrices that pass the pre-filter,
+CMR is faster (see [Larger matrices](#larger-matrices)). These are a few
+families of test matrices, not a survey: other inputs may favour either
+program.
 
 The tables compare CMR's `cmr-tu` tool (Release build, default decomposition
 algorithm) with `is_totally_unimodular` on the same machine. Both gave the
@@ -201,27 +203,27 @@ what the first rows of the table mostly show.
 
 | Matrix | Size | TU | CMR | `is_totally_unimodular` |
 |---|---|---|---|---|
-| K₃₃ | 5×4 | true | 0.34 ms | 0.011 ms |
-| F₁ | 5×5 | true | 0.46 ms | 0.008 ms |
-| R10 | 5×5 | true | 0.32 ms | 0.52 ms |
-| R12 | 6×6 | true | 0.91 ms | 0.074 ms |
-| Fano | 3×4 | false | 0.36 ms | 0.011 ms |
-| CMR Eulerian test | 12×12 | false | 2.9 ms | 1.4 ms |
-| CMR partition test | 14×14 | false | 3.6 ms | 3.5 ms |
-| 2-sum chain, 6 blocks | 22×22 | true | 1.5 ms | 0.39 ms |
-| 2-sum chain, 13 blocks | 47×46 | true | 3.1 ms | 1.2 ms |
-| 2-sum chain, 41 blocks | 145×144 | true | 12.7 ms | 6.4 ms |
-| 2-sum chain, 201 blocks | 705×704 | true | 0.22 s | 0.10 s |
-| 2-sum chain (13 blocks) + non-TU block | 50×48 | false | 3.4 ms | 1.3 ms |
-| 2-sum chain (201 blocks) + non-TU block | 708×706 | false | 0.22 s | 0.11 s |
-| random network | 20×40 | true | 0.61 ms | 0.22 ms |
-| random network | 50×100 | true | 0.92 ms | 0.79 ms |
-| random network | 100×200 | true | 1.5 ms | 2.5 ms |
-| random network | 200×400 | true | 3.0 ms | 7.5 ms |
-| network, one entry flipped | 50×100 | false | 0.15 s | 4.4 ms |
-| random sparse, density 0.1 | 30×30 | false | 2.0 ms | 0.35 ms |
-| random sparse, density 0.05 | 100×100 | false | 9.8 ms | 9.2 ms |
-| random sparse, density 0.5 | 20×20 | false | 0.48 ms | 0.37 ms |
+| K₃₃ | 5×4 | true | 0.34 ms | 0.013 ms |
+| F₁ | 5×5 | true | 0.33 ms | 0.009 ms |
+| R10 | 5×5 | true | 0.34 ms | 0.48 ms |
+| R12 | 6×6 | true | 0.95 ms | 0.066 ms |
+| Fano | 3×4 | false | 0.35 ms | 0.013 ms |
+| CMR Eulerian test | 12×12 | false | 3.0 ms | 0.96 ms |
+| CMR partition test | 14×14 | false | 3.7 ms | 1.7 ms |
+| 2-sum chain, 6 blocks | 22×22 | true | 1.5 ms | 0.38 ms |
+| 2-sum chain, 13 blocks | 47×46 | true | 3.2 ms | 1.2 ms |
+| 2-sum chain, 41 blocks | 145×144 | true | 13.4 ms | 6.2 ms |
+| 2-sum chain, 201 blocks | 705×704 | true | 0.22 s | 0.09 – 0.13 s |
+| 2-sum chain (13 blocks) + non-TU block | 50×48 | false | 3.3 ms | 1.3 ms |
+| 2-sum chain (201 blocks) + non-TU block | 708×706 | false | 0.22 s | 0.12 – 0.13 s |
+| random network | 20×40 | true | 0.62 ms | 0.15 ms |
+| random network | 50×100 | true | 1.0 ms | 0.77 ms |
+| random network | 100×200 | true | 1.5 ms | 2.6 ms |
+| random network | 200×400 | true | 2.9 ms | 7.6 ms |
+| network, one entry flipped | 50×100 | false | 0.15 s | 2.5 ms |
+| random sparse, density 0.1 | 30×30 | false | 1.9 ms | 0.29 ms |
+| random sparse, density 0.05 | 100×100 | false | 10.0 ms | 4.0 ms |
+| random sparse, density 0.5 | 20×20 | false | 0.44 ms | 0.35 ms |
 
 The next family has no 2-separation and is neither a network matrix nor the
 transpose of one: the 3-sum of the network matrix of Kₙ with the transpose
@@ -232,16 +234,16 @@ larger ones did not finish.
 
 | Matrix | Size | TU | CMR | `is_totally_unimodular` |
 |---|---|---|---|---|
-| K₅ ⊕₃ K₅* | 10×8 | true | 0.71 ms | 0.19 ms |
-| K₆ ⊕₃ K₅* | 11×12 | true | 1.4 ms | 0.57 ms |
-| K₆ ⊕₃ K₆* | 15×13 | true | 1.7 ms | 1.2 ms |
-| K₇ ⊕₃ K₆* | 16×18 | true | 1.2 ms | 0.71 ms |
-| K₇ ⊕₃ K₇* | 21×19 | true | 1.1 ms | 0.71 ms |
-| K₈ ⊕₃ K₇* | 22×25 | true | 2.9 ms | 3.3 ms |
-| K₈ ⊕₃ K₈* | 28×26 | true | 1.6 ms | 1.8 ms |
-| K₉ ⊕₃ K₉* | 36×34 | true | 6.2 ms | 12.7 ms |
-| K₁₂ ⊕₃ K₁₂* | 66×64 | true | 38.1 ms | 25.4 ms |
-| the nine above, one entry flipped | 10×8 – 66×64 | false | 0.4 – 37 ms | 0.03 – 5.0 ms |
+| K₅ ⊕₃ K₅* | 10×8 | true | 0.76 ms | 0.17 ms |
+| K₆ ⊕₃ K₅* | 11×12 | true | 1.5 ms | 0.29 ms |
+| K₆ ⊕₃ K₆* | 15×13 | true | 1.9 ms | 0.32 ms |
+| K₇ ⊕₃ K₆* | 16×18 | true | 1.2 ms | 0.43 ms |
+| K₇ ⊕₃ K₇* | 21×19 | true | 1.1 ms | 0.36 ms |
+| K₈ ⊕₃ K₇* | 22×25 | true | 3.0 ms | 0.71 ms |
+| K₈ ⊕₃ K₈* | 28×26 | true | 1.6 ms | 0.72 ms |
+| K₉ ⊕₃ K₉* | 36×34 | true | 6.7 ms | 1.9 ms |
+| K₁₂ ⊕₃ K₁₂* | 66×64 | true | 39.2 ms | 3.2 ms |
+| the nine above, one entry flipped | 10×8 – 66×64 | false | 0.4 – 38 ms | 0.04 – 1.4 ms |
 
 How to read these numbers:
 
@@ -253,9 +255,9 @@ How to read these numbers:
   submatrix before the decomposition starts. On "network, one entry
   flipped" and the flipped 66×64 matrix, CMR spends its time enumerating
   3-separation candidates instead.
-- **Larger TU matrices**: within a small factor of each other at these
-  sizes, with CMR ahead where the input offers no shortcut — about 3× on
-  the 200×400 network matrix and 2× on the 36×34 3-sum.
+- **Larger TU matrices**: within a small factor of each other, in either
+  direction: CMR is about 2.5× ahead on the 200×400 network matrix, this
+  package 3.5× to 12× on the 36×34 and 66×64 3-sums.
 
 #### Larger matrices
 
@@ -266,22 +268,23 @@ the pre-filter, which is the worst case for both programs.
 
 | Size | TU: CMR | TU: this package | non-TU: CMR | non-TU: this package |
 |---|---|---|---|---|
-| 36×34 | 1.6 – 1.8 ms | 3.2 – 5.0 ms | 12 ms | 31 ms |
-| 66×64 | 13 – 16 ms | 36 – 66 ms | 60 – 73 ms | 0.20 – 0.21 s |
-| 120×118 | 33 – 189 ms | 0.30 – 0.45 s | 0.50 s | 1.1 s |
-| 190×188 | 0.10 – 1.5 s | 0.28 – 1.0 s | 2.3 s | 4.0 – 4.2 s |
-| 276×274 | 0.24 – 0.34 s | 1.8 – 2.7 s | 9.1 – 9.3 s | 12 s |
-| 378×376 | 0.76 – 0.77 s | 8.8 – 8.9 s | 29 s | 39 s |
+| 36×34 | 1.8 – 1.9 ms | 1.0 – 3.5 ms | 13 – 14 ms | 27 ms |
+| 66×64 | 13 – 16 ms | 4.8 – 6.2 ms | 59 – 72 ms | 0.16 s |
+| 120×118 | 31 – 195 ms | 98 – 133 ms | 0.50 s | 0.83 – 0.85 s |
+| 190×188 | 0.12 – 1.6 s | 49 – 85 ms | 2.5 s | 3.5 – 4.0 s |
+| 276×274 | 0.26 – 0.38 s | 0.27 – 0.50 s | 9.4 – 9.5 s | 10 – 11 s |
+| 378×376 | 0.41 – 0.76 s | 0.40 – 0.57 s | 18 s | 23 – 24 s |
 
-On TU matrices CMR's lead grows with size, to between 8× and 12× at
-276×274 and above (with one exception in this sample, the unpivoted 190×188
-matrix, where it took 1.5 s against 0.28 s). On the non-TU worst case the
-two are closer — CMR is 2× to 3.5× ahead up to 120×118 and 1.3× at 378×376
-— and both become slow: half a minute or more at that size.
+On TU matrices the two are level within a factor of about 3 either way,
+with no trend in size; the search here stops at the first separation it
+finds, so its time depends on luck in the order it tries candidates. On the
+non-TU worst case CMR is ahead, 1.6× to 2.7× up to 120×118 and 1.1× to
+1.6× above, and both become slow: about 20 s at 378×376.
 
-So: for matrices up to a few dozen rows and columns, or many small ones,
-this package is a reasonable choice and needs no C toolchain. For anything
-larger, and whenever you need the decomposition itself, use CMR.
+So: this package is a reasonable choice at these sizes and needs no C
+toolchain. Use CMR when the hardest non-TU inputs dominate your workload,
+when you need the decomposition or a certificate, or at sizes beyond those
+measured here.
 
 Rank computations avoid floating-point SVD entirely: the hot paths use
 Float64 Gaussian elimination (exact for the small {-1,0,1} matrices arising

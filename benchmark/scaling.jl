@@ -60,7 +60,7 @@ for n in (9, 12, 16, 20, 24, 28)
     found = 0
     for _ in 1:400
         X = copy(P); k = rand(rng, 1:length(X)); X[k] = rand(rng, setdiff(-1:1, X[k]))
-        T._tu_eulerian(X, 3; budget = 4 * prod(size(X)) * sum(size(X))) || continue
+        T._tu_short_cycles(X; budget = 4 * prod(size(X)) * sum(size(X))) || continue
         a, _ = cmr(X); a === false || continue
         push!(cases, "non-TU, passes filter" => X); found += 1; found == 2 && break
     end
