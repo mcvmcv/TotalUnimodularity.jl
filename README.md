@@ -36,6 +36,9 @@ Once registered:
 ] add TotalUnimodularity
 ```
 
+The only dependency is PrecompileTools; `using TotalUnimodularity` takes
+about 0.1 s.
+
 ## Usage
 
 ### Testing for total unimodularity
@@ -156,7 +159,7 @@ The "path" column shows which stage of the algorithm decides the answer.
 | network matrix | 3×3 | true | 3 µs | 2.6 µs | network test |
 | K₃₃ | 5×4 | true | 14 µs | 12 µs | network test |
 | F₁ | 5×5 | true | 29 µs | 8.7 µs | special matrix (F₁/F₂) |
-| R10 | 5×5 | true | 25 µs | 487 µs | special matrix (F₁/F₂) |
+| R10 | 5×5 | true | 25 µs | 34 µs | special matrix (F₁/F₂) |
 | R12 | 6×6 | true | 171 µs | 77 µs | Ghouila-Houri |
 | Fano | 3×4 | false | 6 µs | 11 µs | 2×2/3×3 pre-filter |
 | one_sum(K₃₃, K₃₃) | 10×8 | true | 11.7 ms | 26 µs | 1-sum component split |
@@ -169,8 +172,8 @@ The "path" column shows which stage of the algorithm decides the answer.
 | 2-sum chain | 705×704 | true | — (infeasible) | 0.09 – 0.13 s | 2-sum split |
 
 The naive checker and `is_totally_unimodular` are level on the very
-smallest matrices; `is_totally_unimodular` pulls ahead from about 5×5 (R10
-is the exception) and remains usable far beyond the naive checker's
+smallest matrices; `is_totally_unimodular` pulls ahead from about 5×5
+and remains usable far beyond the naive checker's
 exponential wall. The naive column was measured earlier than the other.
 
 ### Benchmark: CMR vs `is_totally_unimodular`
@@ -205,7 +208,7 @@ what the first rows of the table mostly show.
 |---|---|---|---|---|
 | K₃₃ | 5×4 | true | 0.34 ms | 0.013 ms |
 | F₁ | 5×5 | true | 0.33 ms | 0.009 ms |
-| R10 | 5×5 | true | 0.34 ms | 0.48 ms |
+| R10 | 5×5 | true | 0.34 ms | 0.034 ms |
 | R12 | 6×6 | true | 0.95 ms | 0.066 ms |
 | Fano | 3×4 | false | 0.35 ms | 0.013 ms |
 | CMR Eulerian test | 12×12 | false | 3.0 ms | 0.96 ms |

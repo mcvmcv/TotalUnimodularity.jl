@@ -1,5 +1,4 @@
 using Random
-using Graphs
 
 import TotalUnimodularity: _tu_partition, _gf2_rank_capped, _find_two_separation,
                             _find_three_separation,
@@ -11,7 +10,7 @@ import TotalUnimodularity: _tu_partition, _gf2_rank_capped, _find_two_separation
                             _all_columns_few_nonzeros,
                             _is_network_matrix_few_nonzeros,
                             _find_disconnected_gi,
-                            _compute_w_sets, _build_h, _is_network_matrix,
+                            _compute_w_sets, _build_h, _is_bipartite, _is_network_matrix,
                             _split_submatrices, _decompose, _extract_rank1,
                             _find_epsilon, _det_int!
 
@@ -207,16 +206,16 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
 
         # H should be bipartite for F_2 to pass the network matrix test
         # (F_2 IS a network matrix so H must be bipartite)
-        @test !Graphs.is_bipartite(h)
-        @test Graphs.nv(h) == 4  # 4 components
-        @test Graphs.ne(h) == 6
+        @test !_is_bipartite(h)
+        @test length(h) == 4  # 4 components
+        @test sum(length, h) == 2 * 6  # 6 edges
 
         # H for M3 should be bipartite (M3 is a network matrix)
         result = _find_disconnected_gi(M3)
         i, components, orig = result
         W, W_rows, U = _compute_w_sets(M3, i, components, orig)
         h = _build_h(components, orig, W_rows, U)
-        @test Graphs.is_bipartite(h)
+        @test _is_bipartite(h)
     end
 
     @testset "_split_submatrices" begin

@@ -1,8 +1,5 @@
 module TotalUnimodularity
 
-using LinearAlgebra
-using Combinatorics
-using Graphs
 using PrecompileTools: @setup_workload, @compile_workload
 
 # Public API
@@ -65,72 +62,92 @@ function _drop_trivial_vectors(M::Matrix{Int}, dim::Int)
     return dim == 1 ? M[mask, :] : M[:, mask]
 end
 
+# All permutations of 1:n, as vectors.
+function _permutations(n::Int)::Vector{Vector{Int}}
+    n == 0 && return [Int[]]
+    out = Vector{Int}[]
+    for p in _permutations(n - 1), k in n:-1:1
+        push!(out, [p[1:k-1]; n; p[k:end]])
+    end
+    out
+end
+const _PERMS5 = _permutations(5)
+
 # Check if matrix M is equivalent to target under ±1 row/column scalings
-# and row/column permutations. Assumes M and target are both 5×5 {-1,0,1} matrices.
+# and row/column permutations. Assumes M and target are both 5×5 {-1,0,1}
+# matrices. For each row permutation, column j of M can only go to a column
+# of target with the same support, so the column permutation is built from
+# supports (backtracking over columns with equal support) rather than
+# enumerated; each complete match then gets the sign check.
 function _is_sign_and_permutation_equivalent(M::Matrix{Int}, target::Matrix{Int})
     n = 5
-    # Pre-allocate buffers — reused across all iterations
     row_signs = zeros(Int, n)
     col_signs = zeros(Int, n)
     queue = Vector{Tuple{Int,Int}}(undef, 2n)
+    col_perm = zeros(Int, n)
+    used = falses(n)
+    mmask = [sum((M[i, j] != 0) << (i - 1) for i in 1:n) for j in 1:n]
+    tmask = zeros(Int, n)
 
-    for row_perm in permutations(1:n)
-        for col_perm in permutations(1:n)
-
-            # Cheap sparsity check before doing any sign work
-            sparsity_ok = true
-            for i in 1:n
+    # Signs: with the permutations fixed, propagate a sign for every row and
+    # column from row 1 over the nonzeros and check consistency.
+    function signs_ok(row_perm)
+        fill!(row_signs, 0)
+        fill!(col_signs, 0)
+        row_signs[1] = 1
+        queue[1] = (0, 1)  # 0 = row, 1 = col
+        head = tail = 1
+        while head <= tail
+            (dim, idx) = queue[head]
+            head += 1
+            if dim == 0  # row
                 for j in 1:n
-                    if iszero(M[i,j]) != iszero(target[row_perm[i], col_perm[j]])
-                        sparsity_ok = false
-                        @goto next_col_perm
+                    M[idx, j] == 0 && continue
+                    required = target[row_perm[idx], col_perm[j]] * row_signs[idx] * M[idx, j]
+                    if col_signs[j] == 0
+                        col_signs[j] = required
+                        queue[tail += 1] = (1, j)
+                    elseif col_signs[j] != required
+                        return false
+                    end
+                end
+            else  # col
+                for i in 1:n
+                    M[i, idx] == 0 && continue
+                    required = target[row_perm[i], col_perm[idx]] * col_signs[idx] * M[i, idx]
+                    if row_signs[i] == 0
+                        row_signs[i] = required
+                        queue[tail += 1] = (0, i)
+                    elseif row_signs[i] != required
+                        return false
                     end
                 end
             end
-
-            # BFS sign propagation
-            fill!(row_signs, 0)
-            fill!(col_signs, 0)
-            row_signs[1] = 1
-            queue[1] = (0, 1)  # 0 = row, 1 = col
-            queue_head = 1
-            queue_tail = 1
-
-            while queue_head <= queue_tail
-                (dim, idx) = queue[queue_head]
-                queue_head += 1
-
-                if dim == 0  # row
-                    for j in 1:n
-                        M[idx, j] == 0 && continue
-                        required = target[row_perm[idx], col_perm[j]] * row_signs[idx] * M[idx, j]
-                        if col_signs[j] == 0
-                            col_signs[j] = required
-                            queue_tail += 1
-                            queue[queue_tail] = (1, j)
-                        elseif col_signs[j] != required
-                            @goto next_col_perm
-                        end
-                    end
-                else  # col
-                    for i in 1:n
-                        M[i, idx] == 0 && continue
-                        required = target[row_perm[i], col_perm[idx]] * col_signs[idx] * M[i, idx]
-                        if row_signs[i] == 0
-                            row_signs[i] = required
-                            queue_tail += 1
-                            queue[queue_tail] = (0, i)
-                        elseif row_signs[i] != required
-                            @goto next_col_perm
-                        end
-                    end
-                end
-            end
-
-            return true  # consistent sign assignment found
-
-            @label next_col_perm
         end
+        true
+    end
+
+    # Assign columns j, j+1, … of M to unused columns of target with the
+    # same support under row_perm.
+    function assign(row_perm, j)
+        j > n && return signs_ok(row_perm)
+        for t in 1:n
+            (used[t] || tmask[t] != mmask[j]) && continue
+            used[t] = true
+            col_perm[j] = t
+            assign(row_perm, j + 1) && return true
+            used[t] = false
+        end
+        false
+    end
+
+    for row_perm in _PERMS5
+        for t in 1:n
+            tmask[t] = sum((target[row_perm[i], t] != 0) << (i - 1) for i in 1:n)
+        end
+        sort(tmask) == sort(mmask) || continue
+        fill!(used, false)
+        assign(row_perm, 1) && return true
     end
     return false
 end
@@ -145,7 +162,7 @@ function _is_special_matrix(M::Matrix{Int})
     size(M) == (5, 5) || return false
     # The multiset of absolute row sums is invariant under sign/permutation equivalence.
     # F_1 has profile [3,3,3,3,3]; F_2 has profile [3,3,3,3,5].
-    # This O(n) check rejects most non-equivalent matrices before the O(14400) loop.
+    # This O(n) check rejects most non-equivalent matrices before the search.
     # (sort on a Vector: sort(::NTuple) needs Julia ≥ 1.12.)
     row_abs_sums = sort!([sum(abs, @view M[i,:]) for i in 1:5])
     if row_abs_sums == [3,3,3,3,3]
@@ -593,7 +610,7 @@ end
 """
     _build_h(components, orig, W_rows, U)
 
-Build the graph H on components C_1,...,C_p of G_i.
+Build the graph H on components C_1,...,C_p of G_i, as adjacency lists.
 
 Two components C_k and C_l are adjacent in H iff:
 - ∃ i ∈ C_k : U_k ⊄ W_i and U_k ∩ W_i ≠ ∅, and
@@ -613,7 +630,7 @@ function _build_h(components::Vector{Vector{Int}},
                   W_rows::Dict{Int, Set{Int}},
                   U::Vector{Set{Int}})
     p = length(components)
-    h = Graphs.SimpleGraph(p)
+    h = [Int[] for _ in 1:p]
 
     for k in 1:p, l in k+1:p
         # Check: ∃ i ∈ C_k such that U_l ⊄ W_i and U_l ∩ W_i ≠ ∅
@@ -630,9 +647,34 @@ function _build_h(components::Vector{Vector{Int}},
         end
         l_ok || continue
 
-        Graphs.add_edge!(h, k, l)
+        push!(h[k], l)
+        push!(h[l], k)
     end
     return h
+end
+
+# Whether the graph with adjacency lists h is bipartite (two-colouring by
+# breadth-first search).
+function _is_bipartite(h::Vector{Vector{Int}})::Bool
+    colour = zeros(Int, length(h))
+    queue = Int[]
+    for s in eachindex(h)
+        colour[s] == 0 || continue
+        colour[s] = 1
+        push!(queue, s)
+        while !isempty(queue)
+            v = popfirst!(queue)
+            for u in h[v]
+                if colour[u] == 0
+                    colour[u] = -colour[v]
+                    push!(queue, u)
+                elseif colour[u] == colour[v]
+                    return false
+                end
+            end
+        end
+    end
+    true
 end
 
 """
@@ -707,7 +749,7 @@ function _is_network_matrix(M::Matrix{Int})
     h = _build_h(components, orig, W_rows, U)
 
     # H must be bipartite
-    Graphs.is_bipartite(h) || return false
+    _is_bipartite(h) || return false
 
     # Recursively test each submatrix. Columns that are zero on the rows of
     # a submatrix play no part in any step of the test, and dropping them
@@ -1714,16 +1756,38 @@ function naive_is_totally_unimodular(M::Matrix{Int})
     r, c = size(M)
     for s in 1:min(r, c)
         buf = Matrix{Int}(undef, s, s)
-        for rows in combinations(1:r, s), cols in combinations(1:c, s)
-            for (cj, j) in enumerate(cols), (ri, i) in enumerate(rows)
-                buf[ri, cj] = M[i, j]
+        rows = collect(1:s)
+        while true
+            cols = collect(1:s)
+            while true
+                for (cj, j) in enumerate(cols), (ri, i) in enumerate(rows)
+                    buf[ri, cj] = M[i, j]
+                end
+                # Exact integer determinant — Float64 det could misreport ±1/0
+                # near the rounding threshold, and this is the test oracle.
+                _det_int!(buf) in (-1, 0, 1) || return false
+                _next_combination!(cols, c) || break
             end
-            # Exact integer determinant — Float64 det could misreport ±1/0
-            # near the rounding threshold, and this is the test oracle.
-            _det_int!(buf) in (-1, 0, 1) || return false
+            _next_combination!(rows, r) || break
         end
     end
     return true
+end
+
+# Advance the increasing vector `v` to the next k-subset of 1:n in
+# lexicographic order; `false` if it was the last.
+function _next_combination!(v::Vector{Int}, n::Int)::Bool
+    k = length(v)
+    i = k
+    while i >= 1 && v[i] == n - k + i
+        i -= 1
+    end
+    i == 0 && return false
+    v[i] += 1
+    for t in i+1:k
+        v[t] = v[t-1] + 1
+    end
+    true
 end
 
 """

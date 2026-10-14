@@ -403,8 +403,24 @@ implementation on 60,000 random matrices):
   on the rows of M_k take no part in any step and are dropped
   (`_split_submatrices(...; drop_zero_columns = true)`).
 
-`_build_h` still uses Graphs.jl; it runs once per level on the components,
-not once per row.
+`_build_h` returns adjacency lists and `_is_bipartite` two-colours them;
+it runs once per level on the components, not once per row. With that,
+Graphs.jl was no longer needed, and neither was Combinatorics.jl (the naive
+checker steps through subsets with `_next_combination!`, the special-matrix
+test uses a fixed list of the 120 permutations of 1:5). Dropping both took
+`using TotalUnimodularity` from 0.8 s to 0.1 s.
+
+### Special-matrix test derives the column permutation
+`_is_sign_and_permutation_equivalent` tried every pair of row and column
+permutations, 14,400, with a support check on each; on a matrix with F_2's
+row-sum profile that is not F_2 under the first few row orders, that was
+about 0.5 ms (the README's "R10" row, which is F_2 with rows permuted). Once
+the rows are permuted, column j can only go to a column of the target with
+the same support, so the column permutation is built from supports, with
+backtracking only among columns of equal support, and the sign check runs on
+each complete match: about 12 µs. It agrees with brute force (all
+permutation pairs and all 2¹⁰ sign vectors) on 6,000 perturbed copies of
+F_1 and F_2.
 
 ### Recursion depth counts pivots only
 `depth` used to be incremented on every recursive call, with a cutoff at
