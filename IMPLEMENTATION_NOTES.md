@@ -7,7 +7,7 @@ future developers and AI assistants working on this codebase.
 ## Development History
 
 The package was implemented incrementally following Schrijver Chapter 19-20,
-with each component tested against `naive_is_totally_unimodular` as an oracle.
+with each component tested against `is_totally_unimodular(M; algorithm = :naive)` (formerly the naive test (`algorithm = :naive`)) as an oracle.
 
 ## Key Design Decisions
 
@@ -45,7 +45,7 @@ gives wrong results. The fix: check A and D for trivial/dependent vectors before
 applying Case 4, and return `false` if degenerate.
 
 This is a defensive fix — it may give false negatives for some TU matrices,
-but in practice all tested matrices agree with `naive_is_totally_unimodular`.
+but in practice all tested matrices agree with the naive test (`algorithm = :naive`).
 
 **Superseded (October 2026):** the check has been removed; see "Case 4
 accepts degenerate A and D" below.
@@ -94,7 +94,7 @@ incorrectly identifying F_2 as a network matrix.
 ## Bugs Found During Random Testing
 
 All bugs below were found by comparing `is_totally_unimodular` against
-`naive_is_totally_unimodular` on random {-1, 0, 1} matrices.
+the naive test (`algorithm = :naive`) on random {-1, 0, 1} matrices.
 
 ### Bug 1: `_is_trivial_vector` missing negative standard basis vectors
 **Symptom:** Non-TU matrices reported as TU.
@@ -207,7 +207,7 @@ matroid-intersection search of Theorem 20.2, O((m+n)^8), which never
 finished on anything of that size.
 
 The exhaustive ≤12×12 bipartition search in `_decompose` is used only with
-`fast = false`, i.e. `cmr_is_totally_unimodular(M; algorithm=:decomposition)`,
+`fast = false`, i.e. `is_totally_unimodular(M; algorithm = :exhaustive)`,
 which also skips steps 2, 4 and 5 for those blocks. It is an independent
 implementation of the search, and every oracle and regression test runs
 through both routes. The matroid-intersection search (`_decompose_matroid`,
@@ -470,7 +470,7 @@ in ~30 seconds (previously ~150 CPU-minutes with SVD).
 ## Testing
 
 ### Oracle
-`naive_is_totally_unimodular` checks all square submatrix determinants.
+the naive test (`algorithm = :naive`) checks all square submatrix determinants.
 Exponential time but correct. Used to verify `is_totally_unimodular`.
 
 ### Random testing
@@ -487,7 +487,7 @@ flips one entry in about a third of them, and checks both routes against
 so the 2000 seeded inputs in the suite are a smoke test: after changing
 `_apply_decomposition`, `_decompose` or the recursion, run the generator
 over several seeds × ~8000 inputs. The generator caps matrices at 12×12, so
-the `:decomposition` route never calls `_find_two_separation` on them; the
+the `:exhaustive` route never calls `_find_two_separation` on them; the
 default route does. Raising the cap (18×18 was used when the 2-sum split
 went in) exercises it on both.
 

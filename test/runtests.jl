@@ -12,12 +12,12 @@ include("test_cmr.jl")
 @testset "Public API" begin
 
      @testset "Known TU matrices" begin
-         @test naive_is_totally_unimodular(Matrix{Int}(I, 3, 3))
-         @test naive_is_totally_unimodular(F_1)
-         @test naive_is_totally_unimodular(F_2)
-         @test naive_is_totally_unimodular([1 0 1; 0 1 1; -1 0 0])
-         @test !naive_is_totally_unimodular([1 0 1; 1 1 0; 0 1 1])
-         @test !naive_is_totally_unimodular([1 0 0 1; 1 0 1 0; 1 1 0 0; 1 1 1 1])
+         @test is_totally_unimodular(Matrix{Int}(I, 3, 3); algorithm = :naive)
+         @test is_totally_unimodular(F_1; algorithm = :naive)
+         @test is_totally_unimodular(F_2; algorithm = :naive)
+         @test is_totally_unimodular([1 0 1; 0 1 1; -1 0 0]; algorithm = :naive)
+         @test !is_totally_unimodular([1 0 1; 1 1 0; 0 1 1]; algorithm = :naive)
+         @test !is_totally_unimodular([1 0 0 1; 1 0 1 0; 1 1 0 0; 1 1 1 1]; algorithm = :naive)
      end  
 
     @testset "is_totally_unimodular" begin
@@ -43,16 +43,23 @@ include("test_cmr.jl")
         @test is_totally_unimodular(Int8.(M))
         @test is_totally_unimodular(M .== 1)            # BitMatrix
         @test is_totally_unimodular(transpose(M))       # lazy wrapper
-        @test naive_is_totally_unimodular(Int32.(M))
+        @test is_totally_unimodular(Int32.(M); algorithm = :naive)
         @test !is_totally_unimodular([Int128(2)^70 0; 0 1])  # out-of-range entry
     end
 
     @testset "argument validation" begin
         # Unknown algorithm is an error regardless of the entries.
-        @test_throws ArgumentError cmr_is_totally_unimodular([1 0; 0 1]; algorithm=:bogus)
-        @test_throws ArgumentError cmr_is_totally_unimodular([2 0; 0 1]; algorithm=:bogus)
-        @test_throws ArgumentError cmr_is_totally_unimodular(Int8[2 0; 0 1]; algorithm=:bogus)
-        @test !cmr_is_totally_unimodular(Int8[2 0; 0 1]; algorithm=:partition)
+        @test_throws ArgumentError is_totally_unimodular([1 0; 0 1]; algorithm=:bogus)
+        @test_throws ArgumentError is_totally_unimodular([2 0; 0 1]; algorithm=:bogus)
+        @test_throws ArgumentError is_totally_unimodular(Int8[2 0; 0 1]; algorithm=:bogus)
+        @test !is_totally_unimodular(Int8[2 0; 0 1]; algorithm=:partition)
+        # Every algorithm is accepted, on every input type, and they agree.
+        for M in (F_1, F_2, [1 1 0; 1 0 1; 0 1 1], Int8.(M3), M3 .!= 0, [2 0; 0 1])
+            want = is_totally_unimodular(M)
+            for alg in (:decomposition, :exhaustive, :eulerian, :partition, :naive)
+                @test is_totally_unimodular(M; algorithm = alg) == want
+            end
+        end
         # pivot: k out of range, or leading block not unimodular.
         @test_throws ArgumentError pivot([1 1; 1 1], 3)
         @test_throws ArgumentError pivot([1 1; 1 1], -1)
@@ -79,7 +86,7 @@ include("test_cmr.jl")
     end
 
     # The regressions below are bugs in the Seymour decomposition code, so they
-    # use tu_both_routes (test_cmr.jl) to cover the :decomposition route too.
+    # use tu_both_routes (test_cmr.jl) to cover the :exhaustive route too.
     # Regression: `seen` used to be a global visited-set, so identical blocks
     # in sibling branches (e.g. a 1-sum of a matrix with itself) were treated
     # as cycles and wrongly reported non-TU. Cycle detection is now path-based.
@@ -143,7 +150,7 @@ include("test_cmr.jl")
                  0 -1 -1  1  0  0  0 -1
                  0  1  1 -1  0  0  1  0]
         for M in (cyc1, cyc2, cyc3)
-            @test naive_is_totally_unimodular(M)
+            @test is_totally_unimodular(M; algorithm = :naive)
             @test tu_both_routes(M)
             @test tu_both_routes(Matrix{Int}(M'))
         end
@@ -163,7 +170,7 @@ include("test_cmr.jl")
                0  0  0  0 -1  0  1 -1
                0  0 -1 -1  0  0 -1  1
                0  0  0  0 -1  1  0 -1]
-        @test naive_is_totally_unimodular(M8)
+        @test is_totally_unimodular(M8; algorithm = :naive)
         @test tu_both_routes(M8)
         @test tu_both_routes(Matrix{Int}(M8'))
         # The 12×11 fuzz input that reduces to M8 via a 2-sum.
@@ -196,7 +203,7 @@ include("test_cmr.jl")
             M
         end
         bad = [1 1 1; 1 1 0; 1 0 1; 0 1 1]      # first row is the glue row
-        @test !naive_is_totally_unimodular(bad[2:end, :])
+        @test !is_totally_unimodular(bad[2:end, :]; algorithm = :naive)
         for k in (5, 12, 40, 200)
             M = chain(k)
             @test minimum(size(M)) > 20
@@ -272,11 +279,10 @@ include("test_cmr.jl")
                       0  1  0  0  0  0  1
                       0  0  0 -1  0 -1  0
                       1  0  0  0  0 -1  0]
-        @test !naive_is_totally_unimodular(cmr_abort)
-        @test !tu_both_routes(cmr_abort)
+                @test !tu_both_routes(cmr_abort)
         @test !tu_both_routes(Matrix{Int}(cmr_abort'))
-        for alg in (:eulerian, :partition)
-            @test !cmr_is_totally_unimodular(cmr_abort; algorithm = alg)
+        for alg in (:eulerian, :partition, :naive)
+            @test !is_totally_unimodular(cmr_abort; algorithm = alg)
         end
 
         # Against the exact test, with the search route forced on at every
@@ -323,9 +329,9 @@ include("test_cmr.jl")
         n_bad = 0
         for trial in 1:2000
             M = rand(rng, (-1, 0, 1), rand(rng, 2:5), rand(rng, 2:6))
-            naive = naive_is_totally_unimodular(M)
+            naive = is_totally_unimodular(M; algorithm = :naive)
             fast = is_totally_unimodular(M)
-            decomp = cmr_is_totally_unimodular(M; algorithm=:decomposition)
+            decomp = is_totally_unimodular(M; algorithm = :exhaustive)
             if naive != fast || naive != decomp
                 n_bad += 1
                 @warn "DISAGREEMENT" trial M naive fast decomp
@@ -343,7 +349,7 @@ include("test_cmr.jl")
             M = rand(rng, (-1, 0, 1), rand(rng, 5:8), rand(rng, 5:10))
             want = TotalUnimodularity._tu_partition(M)
             fast = is_totally_unimodular(M)
-            decomp = cmr_is_totally_unimodular(M; algorithm=:decomposition)
+            decomp = is_totally_unimodular(M; algorithm = :exhaustive)
             if want != fast || want != decomp
                 n_bad += 1
                 @warn "DISAGREEMENT" trial M want fast decomp
@@ -425,7 +431,7 @@ include("test_cmr.jl")
             M = rand(rng) < 0.85 ? composed() : biased()
             want = TotalUnimodularity._tu_partition(M)
             fast = is_totally_unimodular(M)
-            decomp = cmr_is_totally_unimodular(M; algorithm=:decomposition)
+            decomp = is_totally_unimodular(M; algorithm = :exhaustive)
             n_tu += want
             if want != fast || want != decomp
                 n_bad += 1

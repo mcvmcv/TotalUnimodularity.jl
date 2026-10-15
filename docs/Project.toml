@@ -1,0 +1,6 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+TotalUnimodularity = "dae517f8-2e2b-4a6d-bb8c-ca4a989a6097"
+
+[compat]
+Documenter = "1"

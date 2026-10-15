@@ -1,5 +1,8 @@
 # TotalUnimodularity.jl
 
+[![CI](https://github.com/mcvmcv/TotalUnimodularity.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/mcvmcv/TotalUnimodularity.jl/actions/workflows/CI.yml)
+[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://mcvmcv.github.io/TotalUnimodularity.jl/dev/)
+
 A pure Julia implementation of total unimodularity testing for integer
 matrices, following the recognition algorithm based on Seymour's
 decomposition theorem.
@@ -39,6 +42,9 @@ Once registered:
 The only dependency is PrecompileTools; `using TotalUnimodularity` takes
 about 0.1 s.
 
+Documentation of the public functions, with examples:
+<https://mcvmcv.github.io/TotalUnimodularity.jl/dev/>.
+
 ## Usage
 
 ### Testing for total unimodularity
@@ -52,22 +58,21 @@ M = [1  0  1  0
 is_totally_unimodular(M)   # true
 ```
 
-### Naive test (exponential time, for verification)
-```julia
-naive_is_totally_unimodular(M)   # true — checks all square submatrices
-```
+### Other algorithms (for verification)
 
-### CMR-style algorithms
-
-`cmr_is_totally_unimodular` mirrors the CMR C library's `CMRtuTest` dispatcher
-and exposes two additional exponential-time (but exact) criteria alongside the
-default decomposition algorithm:
+The `algorithm` keyword selects one of four independent checks. All give the
+same answer as the default; all but the default take exponential time.
 
 ```julia
-cmr_is_totally_unimodular(M)                          # Seymour decomposition (blocks ≤ 12×12)
-cmr_is_totally_unimodular(M; algorithm=:eulerian)     # Camion's Eulerian criterion
-cmr_is_totally_unimodular(M; algorithm=:partition)    # Ghouila-Houri criterion
+is_totally_unimodular(M; algorithm = :decomposition)  # default, polynomial
+is_totally_unimodular(M; algorithm = :exhaustive)     # same decomposition, exhaustive separation search (blocks ≤ 12×12)
+is_totally_unimodular(M; algorithm = :eulerian)       # Camion's Eulerian criterion
+is_totally_unimodular(M; algorithm = :partition)      # Ghouila-Houri criterion
+is_totally_unimodular(M; algorithm = :naive)          # every square submatrix determinant
 ```
+
+`:eulerian` and `:partition` are the two exponential criteria of the CMR C
+library's `CMRtuTest`.
 
 ### Seymour decomposition operations
 
@@ -141,7 +146,7 @@ matrices that are not TU but pass the cheap pre-filter, where the
 3-separation search has to try every candidate: about 0.16 s at 66×64, 10 s
 at 276×274.
 
-`cmr_is_totally_unimodular(M; algorithm=:decomposition)` instead runs the
+`is_totally_unimodular(M; algorithm = :exhaustive)` instead runs the
 Seymour decomposition on blocks up to 12×12 with an exhaustive search for
 the separation: all row/column bipartitions, with a word-parallel GF(2)
 rank prefilter (rank mod 2 never exceeds rational rank). It gives the same
@@ -295,8 +300,8 @@ here) with rank caching, and exact Bareiss integer elimination elsewhere.
 `is_totally_unimodular` accepts any `AbstractMatrix` with integer-valued
 entries.
 
-For verification on small matrices, `naive_is_totally_unimodular` is
-available but has exponential time complexity.
+For verification on small matrices, `algorithm = :naive` checks the
+definition directly, in exponential time.
 
 ## Testing
 ```julia
@@ -304,7 +309,7 @@ available but has exponential time complexity.
 ```
 
 The test suite verifies `is_totally_unimodular` against
-`naive_is_totally_unimodular` on 2000 random matrices of size up to 5×6, and
+`algorithm = :naive` on 2000 random matrices of size up to 5×6, and
 against the exact Ghouila-Houri test on larger random matrices and on 2000
 structured inputs (sums of F_1, F_2, K₃,₃ and network matrices with random
 pivots and scalings) that exercise the decomposition cases. The 2- and
@@ -341,8 +346,8 @@ algorithm.
   test. *Mathematical Programming Computation*, 5(1), 57–73. The method
   behind CMR's total unimodularity test.
 - CMR — Combinatorial Matrix Recognition, a C library by Matthias Walter:
-  <https://github.com/discopt/cmr> (MIT license). The
-  `cmr_is_totally_unimodular` interface mirrors its `CMRtuTest`, part of
+  <https://github.com/discopt/cmr> (MIT license). The `:eulerian` and
+  `:partition` algorithms follow its `CMRtuTest`, part of
   this package's test suite is ported from its `test_tu.cpp`, and the
   benchmarks above compare against it.
 

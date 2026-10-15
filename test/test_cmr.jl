@@ -37,8 +37,8 @@ const K33dual_onesum = [
 # must agree.
 function tu_both_routes(M)
     fast   = is_totally_unimodular(M)
-    decomp = cmr_is_totally_unimodular(M; algorithm=:decomposition)
-    fast == decomp || error("routes disagree: default=$fast, :decomposition=$decomp")
+    decomp = is_totally_unimodular(M; algorithm = :exhaustive)
+    fast == decomp || error("routes disagree: default=$fast, :exhaustive=$decomp")
     fast
 end
 

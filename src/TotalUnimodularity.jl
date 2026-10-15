@@ -3,9 +3,7 @@ module TotalUnimodularity
 using PrecompileTools: @setup_workload, @compile_workload
 
 # Public API
-export naive_is_totally_unimodular
 export is_totally_unimodular
-export cmr_is_totally_unimodular
 export one_sum, two_sum, three_sum
 export pivot
 export F_1, F_2
@@ -269,7 +267,7 @@ _rank_int(A::AbstractMatrix{Int})::Int = (size(A,1)==0 || size(A,2)==0) ? 0 : _r
 # Exact integer determinant via Bareiss elimination — in-place, destroys B.
 # The final pivot equals det(B); row swaps flip the sign. Intermediate values
 # are minors of B (Hadamard bound n^(n/2)), so no Int64 overflow for the
-# {-1,0,1} matrices up to ~15×15 that naive_is_totally_unimodular can handle.
+# {-1,0,1} matrices up to ~15×15 that the naive test (_tu_naive) can handle.
 function _det_int!(B::Matrix{Int})::Int
     n = size(B, 1)
     n == 0 && return 1
@@ -783,6 +781,15 @@ decomposition.
   `ArgumentError` is thrown if `k` is out of range or the leading k×k
   submatrix does not have determinant ±1.
 
+# Example
+```jldoctest
+julia> pivot([1 1 0; 1 0 1; 0 1 1], 1)
+3×3 Matrix{Int64}:
+ -1   1  0
+  1  -1  1
+  0   1  1
+```
+
 # Reference
 Schrijver, *Theory of Linear and Integer Programming*, Chapter 20.
 """
@@ -817,7 +824,7 @@ search exits early almost everywhere.
 
 This is the exhaustive counterpart of `_find_two_separation` and
 `_find_three_separation`, used by
-`cmr_is_totally_unimodular(M; algorithm = :decomposition)` as an independent
+`is_totally_unimodular(M; algorithm = :exhaustive)` as an independent
 check on them.
 
 Returns `(true, (A, B, C, D))` if such a decomposition exists,
@@ -1619,6 +1626,16 @@ If `A` and `B` are both totally unimodular, so is their 1-sum.
 # Arguments
 - `A`, `B`: Integer matrices, each with r + c ≥ 4.
 
+# Example
+```jldoctest
+julia> one_sum([1 1; 0 1], [1 0; 1 1])
+4×4 Matrix{Int64}:
+ 1  1  0  0
+ 0  1  0  0
+ 0  0  1  0
+ 0  0  1  1
+```
+
 # Reference
 Schrijver, *Theory of Linear and Integer Programming*, Chapter 20.
 """
@@ -1649,6 +1666,16 @@ If `A` and `B` are both totally unimodular, so is their 2-sum.
 
 # Arguments
 - `A`, `B`: Integer matrices, each with r + c ≥ 4.
+
+# Example
+```jldoctest
+julia> two_sum([1 0 1; 0 1 1], [1 1; 1 0; 0 1])   # a = [1, 1], b = [1, 1]
+4×4 Matrix{Int64}:
+ 1  0  1  1
+ 0  1  1  1
+ 0  0  1  0
+ 0  0  0  1
+```
 
 # Reference
 Schrijver, *Theory of Linear and Integer Programming*, Chapter 20.
@@ -1693,6 +1720,16 @@ If `A` and `B` are both totally unimodular, so is their 3-sum.
 # Arguments
 - `A`, `B`: Integer matrices in the required form; an error is thrown otherwise.
 
+# Example
+```jldoctest
+julia> three_sum([1 0 1 1; 0 1 1 1; 1 1 0 1], [1 0 1 0; 1 1 0 1; 1 1 1 1])
+4×4 Matrix{Int64}:
+ 1  0  1  0
+ 0  1  1  0
+ 1  1  0  1
+ 1  1  1  1
+```
+
 # Reference
 Schrijver, *Theory of Linear and Integer Programming*, Chapter 20.
 """
@@ -1734,24 +1771,10 @@ end
 # Total unimodularity tests
 # ──────────────────────────────────────────────────────────────────────────────
 
-"""
-    naive_is_totally_unimodular(M)
-
-Test whether integer matrix `M` is totally unimodular by checking that every
-square submatrix has determinant in {-1, 0, 1}.
-
-This algorithm is correct but has exponential time complexity in the size of
-`M`. It is intended for testing and validation only. See
-[`is_totally_unimodular`](@ref) for the polynomial-time implementation.
-
-# Arguments
-- `M::Matrix{Int}`: An integer matrix whose entries must be in {-1, 0, 1};
-  returns `false` immediately otherwise.
-
-# Reference
-Schrijver, *Theory of Linear and Integer Programming*, Chapter 20.
-"""
-function naive_is_totally_unimodular(M::Matrix{Int})
+# TU test by definition: every square submatrix has determinant in
+# {-1, 0, 1}, checked with exact integer determinants. Exponential; the
+# `algorithm = :naive` of is_totally_unimodular, used as a test oracle.
+function _tu_naive(M::Matrix{Int})
     all(m -> m in (-1, 0, 1), M) || return false
     r, c = size(M)
     for s in 1:min(r, c)
@@ -1791,24 +1814,42 @@ function _next_combination!(v::Vector{Int}, n::Int)::Bool
 end
 
 """
-    is_totally_unimodular(M)
+    is_totally_unimodular(M; algorithm = :decomposition)
 
 Test whether the integer matrix `M` is totally unimodular (TU), i.e. whether
 every square submatrix of `M` has determinant in {-1, 0, 1}.
 
-After reduction and splitting into connected blocks, each block is tested for
-being a network matrix, the transpose of one, or one of the special matrices
-[`F_1`](@ref), [`F_2`](@ref) (Schrijver, *Theory of Linear and Integer
-Programming*, Theorems 20.1 and 20.3). Blocks that are none of these are
-split along a 2-separation (2-sum) or, if there is none, a 3-separation
-(3-sum), both found in polynomial time, and the pieces are tested in the same
-way; a block with neither is not TU. Blocks whose smaller dimension is at
-most 8 are decided by an exact branch-and-prune Ghouila-Houri test instead.
-`cmr_is_totally_unimodular(M; algorithm = :decomposition)` runs an
-independent, exhaustive separation search on blocks up to 12×12.
-
 Any `AbstractMatrix` with integer-valued entries is accepted; entries outside
 {-1, 0, 1} make the matrix trivially non-TU, so `false` is returned.
+
+`algorithm` selects the method. All give the same answer; only the first is
+meant for general use, the others exist as independent checks.
+
+| `algorithm`      | Method                                              | Time               |
+|:-----------------|:----------------------------------------------------|:-------------------|
+| `:decomposition` | Seymour decomposition with polynomial searches      | polynomial         |
+| `:exhaustive`    | the same, with an exhaustive separation search      | exponential (≤12×12 blocks) |
+| `:eulerian`      | Camion: every Eulerian square submatrix has sum ≡ 0 (mod 4) | exponential |
+| `:partition`     | Ghouila-Houri: every row subset has an equitable ±1 signing | exponential |
+| `:naive`         | every square submatrix determinant                  | exponential        |
+
+**`:decomposition`** (default): after reduction and splitting into connected
+blocks, each block is tested for being a network matrix, the transpose of
+one, or one of the special matrices [`F_1`](@ref), [`F_2`](@ref) (Schrijver,
+*Theory of Linear and Integer Programming*, Theorems 20.1 and 20.3). Blocks
+that are none of these are split along a 2-separation (2-sum) or, if there is
+none, a 3-separation (3-sum), both found in polynomial time, and the pieces
+are tested in the same way; a block with neither is not TU. Blocks whose
+smaller dimension is at most 8 are decided by an exact branch-and-prune
+Ghouila-Houri test instead.
+
+**`:exhaustive`** runs the same decomposition but finds separations of blocks
+up to 12×12 by trying every row/column bipartition (larger blocks are handled
+as in `:decomposition`): a second implementation of the separation search.
+
+**`:eulerian`**, **`:partition`** are exact criteria, the two exponential
+algorithms of the CMR library's `CMRtuTest`. **`:naive`** checks the
+definition with exact integer determinants.
 
 # Example
 ```jldoctest
@@ -1817,33 +1858,35 @@ true
 
 julia> is_totally_unimodular([1 1 0; 1 0 1; 0 1 1])   # has a 3×3 det = -2
 false
+
+julia> is_totally_unimodular([1 1 0; 1 0 1; 0 1 1]; algorithm = :naive)
+false
 ```
-
-Compare with [`naive_is_totally_unimodular`](@ref), which checks all square
-submatrix determinants directly (exponential time, used as a test oracle).
 """
-function is_totally_unimodular(M::Matrix{Int})::Bool
-    _is_tu_recursive(M, 0, Set{Matrix{Int}}(), true)
+function is_totally_unimodular(M::Matrix{Int}; algorithm::Symbol = :decomposition)::Bool
+    _check_algorithm(algorithm)
+    all(x -> -1 <= x <= 1, M) || return false
+    algorithm === :decomposition && return _is_tu_recursive(M, 0, Set{Matrix{Int}}(), true)
+    algorithm === :exhaustive && return _is_tu_recursive(M, 0, Set{Matrix{Int}}(), false)
+    algorithm === :eulerian && return _tu_eulerian(M)
+    algorithm === :partition && return _tu_partition(M)
+    return _tu_naive(M)
 end
 
-# Convenience methods: accept any integer-valued matrix (Bool, Int8, views, …).
-# Entries outside {-1,0,1} mean non-TU, so reject before converting — this
-# also avoids InexactError for values that don't fit in Int.
-function _to_int_matrix(M::AbstractMatrix{<:Integer})::Union{Matrix{Int}, Nothing}
-    all(x -> -1 <= x <= 1, M) ? Matrix{Int}(M) : nothing
+# Accept any integer-valued matrix (Bool, Int8, views, …). Entries outside
+# {-1,0,1} mean non-TU, so reject before converting — this also avoids
+# InexactError for values that don't fit in Int. The algorithm is checked
+# first, so an unknown one is an error whatever the entries.
+function is_totally_unimodular(M::AbstractMatrix{<:Integer}; algorithm::Symbol = :decomposition)::Bool
+    _check_algorithm(algorithm)
+    all(x -> -1 <= x <= 1, M) || return false
+    is_totally_unimodular(Matrix{Int}(M); algorithm)
 end
-for f in (:is_totally_unimodular, :naive_is_totally_unimodular)
-    @eval function $f(M::AbstractMatrix{<:Integer})::Bool
-        N = _to_int_matrix(M)
-        N === nothing ? false : $f(N)
-    end
-end
-function cmr_is_totally_unimodular(M::AbstractMatrix{<:Integer}; kwargs...)::Bool
-    N = _to_int_matrix(M)
-    # Out-of-range entries: still go through the Matrix{Int} method so the
-    # keyword arguments are validated; any out-of-range stand-in gives false.
-    cmr_is_totally_unimodular(N === nothing ? fill(2, 1, 1) : N; kwargs...)
-end
+
+const _ALGORITHMS = (:decomposition, :exhaustive, :eulerian, :partition, :naive)
+_check_algorithm(a::Symbol) = a in _ALGORITHMS ||
+    throw(ArgumentError("Unknown algorithm $(repr(a)). Use one of " *
+                        join(repr.(_ALGORITHMS), ", ") * "."))
 
 # How often the decomposition could not proceed and the exact Ghouila-Houri
 # test decided instead: more than 100 nested pivots (`depth`), a matrix
@@ -1910,7 +1953,7 @@ function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, 
     # way — cost is then exponential in the largest such block rather than
     # in the whole matrix. With `fast = false`, blocks up to 12×12 skip this
     # and take the exhaustive Seymour decomposition search instead
-    # (cmr_is_totally_unimodular's :decomposition).
+    # (is_totally_unimodular with algorithm = :exhaustive).
     m, n = size(M)
     legacy = !fast && m <= 12 && n <= 12
     if !legacy
@@ -2369,57 +2412,6 @@ function _tu_eulerian(M::Matrix{Int}, max_k::Int = typemax(Int);
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Public dispatcher — mirrors CMRtuTest
-# ──────────────────────────────────────────────────────────────────────────────
-
-"""
-    cmr_is_totally_unimodular(M; algorithm=:decomposition)
-
-Test whether integer matrix `M` is totally unimodular using one of the three
-algorithms from the CMR library (`src/cmr/tu.c`, `CMRtuTest`):
-
-| `algorithm`      | CMR constant                     | Description                       |
-|:-----------------|:---------------------------------|:----------------------------------|
-| `:decomposition` | `CMR_TU_ALGORITHM_DECOMPOSITION` | Seymour decomposition (default)   |
-| `:eulerian`      | `CMR_TU_ALGORITHM_EULERIAN`      | Eulerian submatrix criterion      |
-| `:partition`     | `CMR_TU_ALGORITHM_PARTITION`     | Ghouila-Houri partition criterion |
-
-**`:decomposition`** runs the Seymour decomposition of Theorem 20.3, with its
-exhaustive separation search, on blocks up to 12×12 (where
-[`is_totally_unimodular`](@ref) uses its polynomial separation searches);
-larger blocks are handled as in `is_totally_unimodular`.
-
-**`:eulerian`** — M is TU iff every square Eulerian submatrix (each row and column
-within it has an even number of nonzeros) has total entry sum ≡ 0 (mod 4).
-
-**`:partition`** (Ghouila-Houri) — M is TU iff for every subset R of rows there
-exists a partition R = R⁺ ∪ R⁻ with |∑_{i∈R⁺} Mᵢⱼ − ∑_{i∈R⁻} Mᵢⱼ| ≤ 1 for
-all columns j.
-
-Both `:eulerian` and `:partition` are exponential-time but exact for {-1,0,1}
-inputs; CMR uses them as cross-checks and for small matrices.
-
-# Arguments
-- `M::Matrix{Int}`: Integer matrix whose entries must be in {-1, 0, 1}.
-- `algorithm::Symbol`: Which algorithm to use (default `:decomposition`).
-"""
-function cmr_is_totally_unimodular(M::Matrix{Int};
-                                   algorithm::Symbol = :decomposition)::Bool
-    algorithm in (:decomposition, :eulerian, :partition) ||
-        throw(ArgumentError("Unknown algorithm $(repr(algorithm)). " *
-                            "Use :decomposition, :eulerian, or :partition."))
-    all(m -> m in (-1, 0, 1), M) || return false
-    if algorithm === :decomposition
-        return _is_tu_recursive(M, 0, Set{Matrix{Int}}(), false)
-    elseif algorithm === :eulerian
-        return _tu_eulerian(M)
-    else
-        return _tu_partition(M)
-    end
-end
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # Precompilation workload
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -2460,13 +2452,11 @@ end
         end
         is_totally_unimodular(Int8.(K33))
         is_totally_unimodular(odd_cycle .!= 0)
-        naive_is_totally_unimodular(K33)
-        naive_is_totally_unimodular(odd_cycle)
-        for alg in (:decomposition, :eulerian, :partition)
-            cmr_is_totally_unimodular(two_sum(K33, K33d); algorithm = alg)
-            cmr_is_totally_unimodular(odd_cycle; algorithm = alg)
+        for alg in (:exhaustive, :eulerian, :partition, :naive)
+            is_totally_unimodular(two_sum(K33, K33d); algorithm = alg)
+            is_totally_unimodular(odd_cycle; algorithm = alg)
         end
-        cmr_is_totally_unimodular(F_2)
+        is_totally_unimodular(F_2; algorithm = :exhaustive)
     end
 end
 

@@ -79,7 +79,7 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         for _ in 1:1000
             M = rand(rng, (-1, 0, 1), n, n)
             # If not TU, definitely not F_1 or F_2
-            if !naive_is_totally_unimodular(M)
+            if !is_totally_unimodular(M; algorithm = :naive)
                 @test !_is_special_matrix(M)
                 rejections += 1
             end
@@ -368,7 +368,7 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
             r, c = rand(rng, 5:8), rand(rng, 5:8)
             p = 0.2 + 0.7 * rand(rng)
             M = [rand(rng) < p ? rand(rng, (-1, 1)) : 0 for i in 1:r, j in 1:c]
-            @test _tu_partition(M) == naive_is_totally_unimodular(M)
+            @test _tu_partition(M) == is_totally_unimodular(M; algorithm = :naive)
         end
     end
 
