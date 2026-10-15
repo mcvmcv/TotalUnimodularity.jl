@@ -1891,14 +1891,29 @@ _check_algorithm(a::Symbol) = a in _ALGORITHMS ||
 # How often the decomposition could not proceed and the exact Ghouila-Houri
 # test decided instead: more than 100 nested pivots (`depth`), a matrix
 # repeated on the recursion path (`cycle`), or a 3-sum whose sign ε could not
-# be determined (`epsilon`). None of these is expected on the current code,
-# and the test is exponential, so a nonzero count on a large input explains a
-# stall. The test suite checks that all three stay at zero.
+# be determined (`epsilon`). The test is exponential, so each fallback warns
+# with the reason and the size: on a large input it explains a stall. The
+# test suite checks that all three stay at zero.
+#
+# Which of them can happen at all (see IMPLEMENTATION_NOTES.md):
+#   * `cycle`: never. Every recursive call is on a matrix with strictly fewer
+#     rows plus columns, so no matrix can repeat on the path.
+#   * `depth`: only on a matrix whose decomposition nests more than 100
+#     Case 5/6 pivots, which needs a chain of over 100 3-sums. Measured depth
+#     is at most 1 on the benchmark family up to 378×376.
+#   * `epsilon`: never on the default route, where the block has no
+#     2-separation. On the :exhaustive route a ≤12×12 block can have one with
+#     a side of 3 elements, which `_decompose` does not look for, so there it
+#     is not ruled out.
 const _FALLBACKS = (depth = Threads.Atomic{Int}(0), cycle = Threads.Atomic{Int}(0),
                     epsilon = Threads.Atomic{Int}(0))
 
 function _fallback(M::Matrix{Int}, reason::Symbol)::Bool
     Threads.atomic_add!(getfield(_FALLBACKS, reason), 1)
+    @warn "TotalUnimodularity: the decomposition could not continue ($reason) " *
+          "on a $(size(M, 1))×$(size(M, 2)) block; falling back to the exact " *
+          "Ghouila-Houri test, which is exponential and may take very long. " *
+          "Please report this matrix." maxlog = 10
     _tu_partition(M)
 end
 
@@ -1920,10 +1935,12 @@ function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, fa
     end
 
     # Cycle detection: `seen` holds the matrices on the *current* recursion
-    # path only. Membership means the pivot cases (5/6) have cycled back to an
-    # ancestor, so this branch cannot make progress. That says nothing about
-    # whether M is TU (TU matrices do cycle, e.g. degenerate 3-sum retry ↔
-    # rank-2 pivot), so decide M exactly with the Ghouila-Houri test instead.
+    # path only. Membership would mean the recursion had come back to an
+    # ancestor, which says nothing about whether M is TU, so M would be
+    # decided exactly with the Ghouila-Houri test instead. Since the pivot
+    # cases (5/6) keep the split they pivot on, every recursive call is on a
+    # strictly smaller matrix and this cannot happen (see _FALLBACKS); it
+    # used to, e.g. degenerate 3-sum retry ↔ rank-2 pivot, before that.
     # Each matrix is removed once its subtree is done — identical matrices in
     # sibling branches (e.g. duplicate blocks of a 1-sum) are legitimate.
     M in seen && return _fallback(M, :cycle)
@@ -2085,7 +2102,9 @@ function _apply_decomposition(M::Matrix{Int},
         D4 = D_norm[notC_rows, notB_cols]
         ok1, ε₁ = _find_epsilon(A_norm, B_rows, C_cols)
         ok2, ε₂ = _find_epsilon(D_norm, C_rows, B_cols)
-        # No R–K path means ε is undetermined, not that M is non-TU.
+        # No R–K path means ε is undetermined, not that M is non-TU. It also
+        # means M has a 2-separation (the part of A reachable from R splits
+        # off), so it cannot happen when M has none; see _FALLBACKS.
         (ok1 && ok2) || return _fallback(M, :epsilon)
         nR     = length(B_rows)
         nK     = length(C_cols)

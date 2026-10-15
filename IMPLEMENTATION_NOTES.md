@@ -217,10 +217,54 @@ reach it; `_decompose` now refuses matrices above 12×12.
 `_tu_partition` remains as a fallback in three places: a matrix repeated on
 the recursion path, more than 100 nested pivots, and `_find_epsilon` finding
 no R–K path. They go through `_fallback`, which counts them in
-`_FALLBACKS`; the last testset of the suite checks that the counts did not
-move, and `benchmark/fuzz_cmr.jl` prints them. None has fired since the
-pivot change below. If one does on a large block, the run stalls, as the
-test is exponential — a nonzero count is the first thing to look at.
+`_FALLBACKS` and emits a warning naming the reason and the block size (at
+most 10 per session); the last testset of the suite checks that the counts
+did not move, and `benchmark/fuzz_cmr.jl` prints them. None has fired since
+the pivot change below: in October 2026, 125,000 fuzz inputs (structured
+small matrices with the search route forced and with default routing, the
+3-connected family against the exact test and against CMR) were run with
+every fallback logged, and none fired. If one does on a large block, the run
+stalls, as the test is exponential — the warning says why.
+
+Whether each can be reached:
+
+* **cycle: no.** Every recursive call of `_is_tu_recursive` is on a matrix
+  with strictly fewer rows plus columns. Call the number of rows plus
+  columns of a side its element count. A 1-sum component is a proper part
+  of the matrix. A 2-sum piece has the element count of its side plus 1, and
+  each side of a 2-separation has at least 2. A 3-sum piece (Case 4) has
+  the element count of its side plus 3, and each side has at least 4:
+  `_find_three_separation` takes closed sets of 2 to N − 6 of the N − 4
+  free nodes, plus 2 fixed elements per side, and `_decompose` requires
+  4. Cases 5/6 do not recurse on the pivoted matrix: they move the pivot
+  row to one side and the pivot column to the other, so both element counts
+  stay the same, and go straight to Case 4 on that split. `_reduce` only
+  removes rows and columns. So the matrices on a recursion path have
+  strictly decreasing size, and none can repeat.
+* **depth: only on very deep 3-sum chains.** By the same argument the
+  recursion terminates without the cap, and the depth counts Case 5/6
+  pivots on one path. More than 100 of them needs a decomposition with over
+  100 nested rank-2 3-separations, so a matrix with hundreds of rows
+  arranged as a long chain of 3-sums. On the benchmark family the depth was
+  at most 1, up to 378×376 and after 200 random pivots. The cap is not
+  needed for termination, and where it fires it causes the stall it was
+  meant to prevent; it could be removed.
+* **epsilon: not on the default route.** Suppose `_find_epsilon(A, R, K)`
+  finds no path from R (rows of A meeting B) to K (columns of A meeting
+  C). Let X be the rows and columns of A reachable from R. X misses K, and A
+  has no nonzero between X and the rest of A, so moving the rest of A to side 2
+  leaves a cross block of rank 1 on side 1 (the rows of B in X) and a zero
+  one on side 2 (C lives in the columns of K): a 2-separation, provided X
+  has at least 2 elements. If X is a single row r, then R = {r} and row r is
+  zero in A; moving r alone to side 2 makes B zero and leaves C rank 1, a
+  2-separation with sides of at least 3 and 5. So no path implies a
+  2-separation of M. On the default route Case 4 only sees blocks that
+  `_find_two_separation` (which is complete) found none in, or their
+  pivots, which have the same separations. On the `:exhaustive` route
+  (blocks up to 12×12 only) `_decompose` only looks for 2-separations with
+  sides of at least 4, and a reduced matrix can have one with a side of 3
+  (rows equal outside one column, opposite in it), so there the argument
+  does not rule the fallback out; at that size it is cheap anyway.
 
 ### Precompilation workload
 The first call in a session used to compile the whole decision procedure,
