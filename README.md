@@ -141,10 +141,12 @@ fallbacks, and the test suite checks that none occurs.
 In practice: matrices that split into small pieces and network matrices
 are decided in milliseconds to a tenth of a second at sizes of several
 hundred rows. Blocks that need 3-separations cost more: a few milliseconds
-at 66×64, a few tenths of a second at 276×274. The slowest inputs are large
-matrices that are not TU but pass the cheap pre-filter, where the
-3-separation search has to try every candidate: about 0.16 s at 66×64, 10 s
-at 276×274.
+at 66×64, a few tenths of a second at 276×274. Before the search, two cheap
+checks look for a violating submatrix: one for any 2×2 or 3×3 one, and
+Camion's signing test, which finds a violating cycle of any length when the
+signs are wrong for a support that some signing would make TU. The slowest
+inputs are non-TU matrices that pass both, where the 3-separation search
+has to try every candidate: about 0.16 s at 66×64, 0.8 s at 120×118.
 
 `is_totally_unimodular(M; algorithm = :exhaustive)` instead runs the
 Seymour decomposition on blocks up to 12×12 with an exhaustive search for
@@ -188,8 +190,10 @@ implementation of the full Seymour decomposition, a simplified version of
 Truemper's algorithm. It can also return the decomposition tree and
 certificates, where this package only answers yes or no. On the inputs
 below the two are within a small factor of each other in either direction,
-and on the hardest large inputs, non-TU matrices that pass the pre-filter,
-CMR is faster (see [Larger matrices](#larger-matrices)). These are a few
+except on non-TU matrices that pass the 2×2/3×3 pre-filter: there CMR is
+about 2× faster when the violation is in the support, and this package is
+hundreds of times faster at large sizes when it is in the signs (see
+[Larger matrices](#larger-matrices)). These are a few
 families of test matrices, not a survey: other inputs may favour either
 program.
 
@@ -271,28 +275,33 @@ How to read these numbers:
 
 The same 3-sum family at larger sizes (`benchmark/scaling.jl`; single runs,
 so read the ratios as rough): each member as built, after six random
-pivots, and with one entry changed so that it is not TU but still passes
-the pre-filter, which is the worst case for both programs.
+pivots, and twice with one entry changed so that it is not TU but still
+passes the 2×2/3×3 pre-filter.
 
 | Size | TU: CMR | TU: this package | non-TU: CMR | non-TU: this package |
 |---|---|---|---|---|
-| 36×34 | 1.8 – 1.9 ms | 1.0 – 3.5 ms | 13 – 14 ms | 27 ms |
-| 66×64 | 13 – 16 ms | 4.8 – 6.2 ms | 59 – 72 ms | 0.16 s |
-| 120×118 | 31 – 195 ms | 98 – 133 ms | 0.50 s | 0.83 – 0.85 s |
-| 190×188 | 0.12 – 1.6 s | 49 – 85 ms | 2.5 s | 3.5 – 4.0 s |
-| 276×274 | 0.26 – 0.38 s | 0.27 – 0.50 s | 9.4 – 9.5 s | 10 – 11 s |
-| 378×376 | 0.41 – 0.76 s | 0.40 – 0.57 s | 18 s | 23 – 24 s |
+| 36×34 | 1.5 – 1.7 ms | 1.0 – 3.3 ms | 12 ms | 25 ms |
+| 66×64 | 13 – 15 ms | 4.7 – 6.1 ms | 64 – 73 ms | 0.15 – 0.16 s |
+| 120×118 | 32 – 204 ms | 99 – 130 ms | 0.51 s | 5.7 ms, 0.82 s |
+| 190×188 | 0.11 – 1.7 s | 46 – 79 ms | 2.6 s | 12 – 13 ms |
+| 276×274 | 0.24 – 0.37 s | 0.27 – 0.47 s | 9.8 – 9.9 s | 24 ms |
+| 378×376 | 0.43 – 0.75 s | 0.38 – 0.55 s | 19 s | 44 – 45 ms |
 
 On TU matrices the two are level within a factor of about 3 either way,
 with no trend in size; the search here stops at the first separation it
-finds, so its time depends on luck in the order it tries candidates. On the
-non-TU worst case CMR is ahead, 1.6× to 2.7× up to 120×118 and 1.1× to
-1.6× above, and both become slow: about 20 s at 378×376.
+finds, so its time depends on luck in the order it tries candidates.
+
+The non-TU matrices split in two. From 120×118 up, most have a support that
+some signing makes TU and the wrong signs, and Camion's signing test finds
+a violating cycle in milliseconds, 90× to 430× ahead of CMR. The others
+(all at 36×34 and 66×64, one at 120×118) have a support that no signing
+makes TU, so they pass that test too, and the 3-separation search has to
+try every candidate: there CMR is about 2× ahead.
 
 So: this package is a reasonable choice at these sizes and needs no C
-toolchain. Use CMR when the hardest non-TU inputs dominate your workload,
-when you need the decomposition or a certificate, or at sizes beyond those
-measured here.
+toolchain. Use CMR when non-TU matrices whose support itself is the problem
+dominate your workload, when you need the decomposition or a certificate,
+or at sizes beyond those measured here.
 
 Rank computations avoid floating-point SVD entirely: the hot paths use
 Float64 Gaussian elimination (exact for the small {-1,0,1} matrices arising
