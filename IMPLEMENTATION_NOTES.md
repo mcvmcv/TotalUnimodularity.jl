@@ -496,6 +496,18 @@ in that column, no completion can recover — and at the leaves this invariant
 IS the Ghouila-Houri bound, so no final scan is needed) and sign symmetry
 (the first selected row takes +1 WLOG, halving the tree).
 
+The two recursions are top-level functions (`_partition_subsets`,
+`_partition_search`) sharing a `_PartitionState`, and `_tu_eulerian`'s are
+likewise (`_euler_rows`, `_euler_cols`, `_EulerState`). As nested closures
+that call themselves they were boxed (`Core.Box`), so every recursive call
+was dynamically dispatched: lifting them made the Ghouila-Houri test 2.2×
+and the Eulerian test 1.5× faster on small TU blocks (October 2026, found by
+a review). The same pass removed boxing from `_independent_mask` (a
+reassigned loop variable captured by `all(k -> …)`) and from Cases 5/6 of
+`_apply_decomposition` (pivot indices assigned in both cases and captured by
+comprehensions). Only the recursive `assign` in the 5×5 special-matrix test
+is still boxed; it takes 34 µs.
+
 ### GF(2) rank prefilter in the bipartition search
 For integer matrices, rank over GF(2) never exceeds rank over ℚ (a k×k
 submatrix nonsingular mod 2 has odd, hence nonzero, determinant). For
@@ -546,6 +558,24 @@ to 66×64 can only be checked against the CMR binary:
 with default options aborts on a few non-TU inputs (reported upstream,
 October 2026; one such matrix is in the suite as `cmr_abort`), so the
 script repeats a failed run with `--no-simple-3-sepa`.
+
+### Review tests (`test/extra_tests.jl`)
+Added from a pre-registration review (October 2026). Every expected answer
+comes from theory rather than from running the package: incidence matrices
+of digraphs and bipartite graphs and interval matrices (TU), odd-cycle
+incidence matrices up to C₁₀₁ and odd cycles hidden in connected bipartite
+graphs of up to 240 vertices (minimally non-TU, so from C₅ on the short-cycle
+pre-filter cannot see them), degenerate shapes on all five algorithms, input
+types (sparse, UInt8, BigInt, Bool, views, Float64, Rational, NaN),
+metamorphic variants that preserve TU-ness either way, a threaded run, and
+Aqua. CI runs the suite with 4 threads.
+
+The largest odd-edge graph (240×360, not TU) takes 2–11 s, where CMR takes
+4 ms: it passes the pre-filter, and the 3-separation search then tries every
+pivot before concluding there is no separation. CMR's `--stats` show it
+deciding at its (co)network stage with one Camion sign check, presumably by
+recognising the support as graphic and then testing only the signs; a
+support-graphicness test here would settle such matrices the same way.
 
 ### Known test matrices
 - `F_1`, `F_2`: TU, non-network, non-decomposable

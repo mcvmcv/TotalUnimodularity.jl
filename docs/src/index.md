@@ -16,8 +16,9 @@ julia> is_totally_unimodular([1 1 0; 1 0 1; 0 1 1])
 false
 ```
 
-Any `AbstractMatrix` with integer entries is accepted; entries outside
-{-1, 0, 1} give `false`. The `algorithm` keyword selects one of several
+Any `AbstractMatrix` of real numbers is accepted (integers, `Bool`,
+`Float64`, `Rational`, sparse matrices, views); entries outside {-1, 0, 1}
+give `false`. The `algorithm` keyword selects one of several
 independent exact methods, used for verification; see
 [`is_totally_unimodular`](@ref).
 

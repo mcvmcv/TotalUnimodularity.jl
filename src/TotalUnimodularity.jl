@@ -45,7 +45,7 @@ const F_2 = [1 1 1 1 1
 # Check that a matrix has r + c ≥ 4. Returns (r, c) if valid.
 function _check_size(A::Matrix{Int})
     r, c = size(A)
-    r + c < 4 && error("The number of rows plus columns of each matrix must be at least four.")
+    r + c < 4 && throw(ArgumentError("The number of rows plus columns of each matrix must be at least four."))
     return r, c
 end
 
@@ -203,7 +203,16 @@ function _independent_mask(M::Matrix{Int}, dim::Int)::BitVector
         end
         last = j
         while j != 0
-            if all(k -> sign[i] * entry(i, k) == sign[j] * entry(j, k), 1:len)
+            # A loop, not all(k -> …): a closure capturing j, which this
+            # loop reassigns, would box it.
+            same = true
+            for k in 1:len
+                if sign[i] * entry(i, k) != sign[j] * entry(j, k)
+                    same = false
+                    break
+                end
+            end
+            if same
                 keep[i] = false
                 break
             end
@@ -1739,15 +1748,15 @@ function three_sum(A::Matrix{Int}, B::Matrix{Int})
     @views begin
         # Am and Bm need at least one row and one column each.
         (size(A, 1) < 2 || size(A, 2) < 3) &&
-            error("Matrix A does not have the required form for a 3-sum.")
+            throw(ArgumentError("Matrix A does not have the required form for a 3-sum."))
         (size(B, 1) < 2 || size(B, 2) < 3) &&
-            error("Matrix B does not have the required form for a 3-sum.")
+            throw(ArgumentError("Matrix B does not have the required form for a 3-sum."))
         (A[1:end-1, end-1] != A[1:end-1, end] ||
          A[end, end-1] != 0 || A[end, end] != 1) &&
-            error("Matrix A does not have the required form for a 3-sum.")
+            throw(ArgumentError("Matrix A does not have the required form for a 3-sum."))
         (B[2:end, 1] != B[2:end, 2] ||
          B[1, 1] != 1 || B[1, 2] != 0) &&
-            error("Matrix B does not have the required form for a 3-sum.")
+            throw(ArgumentError("Matrix B does not have the required form for a 3-sum."))
     end
     @views Am, a, c = A[1:end-1, 1:end-2], A[1:end-1, end], A[end, 1:end-2]
     @views Bm, b, d = B[2:end,   3:end  ], B[1,       3:end], B[2:end, 1]
@@ -1816,11 +1825,13 @@ end
 """
     is_totally_unimodular(M; algorithm = :decomposition)
 
-Test whether the integer matrix `M` is totally unimodular (TU), i.e. whether
-every square submatrix of `M` has determinant in {-1, 0, 1}.
+Test whether the matrix `M` is totally unimodular (TU), i.e. whether every
+square submatrix of `M` has determinant in {-1, 0, 1}.
 
-Any `AbstractMatrix` with integer-valued entries is accepted; entries outside
-{-1, 0, 1} make the matrix trivially non-TU, so `false` is returned.
+Any `AbstractMatrix` of real numbers is accepted: integer types, `Bool`,
+`Float64` (as in optimisation models), `Rational`, sparse matrices and views.
+An entry other than -1, 0 or 1 (including a non-integer or `NaN`) is itself a
+1×1 submatrix with a bad determinant, so `false` is returned.
 
 `algorithm` selects the method. All give the same answer; only the first is
 meant for general use, the others exist as independent checks.
@@ -1873,13 +1884,14 @@ function is_totally_unimodular(M::Matrix{Int}; algorithm::Symbol = :decompositio
     return _tu_naive(M)
 end
 
-# Accept any integer-valued matrix (Bool, Int8, views, …). Entries outside
-# {-1,0,1} mean non-TU, so reject before converting — this also avoids
-# InexactError for values that don't fit in Int. The algorithm is checked
-# first, so an unknown one is an error whatever the entries.
-function is_totally_unimodular(M::AbstractMatrix{<:Integer}; algorithm::Symbol = :decomposition)::Bool
+# Accept any real matrix (Bool, Int8, Float64, Rational, sparse, views, …).
+# Entries outside {-1,0,1} mean non-TU, so reject before converting — this
+# also avoids InexactError for non-integers and for values that don't fit in
+# Int. NaN fails every comparison and is rejected too. The algorithm is
+# checked first, so an unknown one is an error whatever the entries.
+function is_totally_unimodular(M::AbstractMatrix{<:Real}; algorithm::Symbol = :decomposition)::Bool
     _check_algorithm(algorithm)
-    all(x -> -1 <= x <= 1, M) || return false
+    all(x -> x == -1 || x == 0 || x == 1, M) || return false
     is_totally_unimodular(Matrix{Int}(M); algorithm)
 end
 
@@ -2135,13 +2147,15 @@ function _apply_decomposition(M::Matrix{Int},
         # applied to that split directly. Searching the pivoted matrix
         # afresh instead can return another rank-2 split and pivot straight
         # back.
+        # (No comprehensions over pi, pj, rA, cA below: Case 6 assigns them
+        # too, and a closure capturing them would box them.)
         pivot_pos = findfirst(!iszero, B)
         pivot_pos === nothing && error("B has rank 2 but no nonzero entries")
         pi, pj = pivot_pos[1], pivot_pos[2]
         rA, cA = size(A)
         rD = size(D, 1)
-        row_order = [pi; [i for i in 1:rA if i != pi]; collect(rA+1:rA+rD)]
-        col_order = [cA+pj; collect(1:cA); [cA+j for j in 1:size(B,2) if j != pj]]
+        row_order = [pi; deleteat!(collect(1:rA), pi); collect(rA+1:rA+rD)]
+        col_order = [cA+pj; collect(1:cA); deleteat!(collect(cA+1:cA+size(B,2)), pj)]
         M_full = [A B; zeros(Int,rD,cA) D]
         P = pivot(M_full[row_order, col_order], 1)
         all(x -> -1 <= x <= 1, P) || return false
@@ -2158,8 +2172,8 @@ function _apply_decomposition(M::Matrix{Int},
         rA, cA = size(A)
         rC_size = size(C, 1)
         cD = size(D, 2)
-        row_order = [rA+pi; collect(1:rA); [rA+i for i in 1:rC_size if i != pi]]
-        col_order = [pj; [j for j in 1:cA if j != pj]; collect(cA+1:cA+cD)]
+        row_order = [rA+pi; collect(1:rA); deleteat!(collect(rA+1:rA+rC_size), pi)]
+        col_order = [pj; deleteat!(collect(1:cA), pj); collect(cA+1:cA+cD)]
         M_full = [A zeros(Int,rA,cD); C D]
         P = pivot(M_full[row_order, col_order], 1)
         all(x -> -1 <= x <= 1, P) || return false
@@ -2221,58 +2235,72 @@ function _tu_partition(M::Matrix{Int})::Bool
     #    become hopeless, keeping each node O(nnz(row)).
     #  * Sign symmetry: negating a whole signing preserves |sums|, so the
     #    first selected row takes +1 WLOG (halves the tree).
-    proc_sum = zeros(Int, c)
-    rem_nnz  = zeros(Int, c)     # over not-yet-signed SELECTED rows
-    sel_rows = Vector{Int}(undef, r)
-    ns = 0
+    st = _PartitionState(row_ptr, row_col, row_val,
+                         zeros(Int, c),        # proc_sum
+                         zeros(Int, c),        # rem_nnz: over not-yet-signed SELECTED rows
+                         Vector{Int}(undef, r), Ref(0), r)
+    _partition_subsets(st, 1)
+end
 
-    # Sign search for sel_rows[k..ns]; proc_sum/rem_nnz reflect rows < k signed.
-    function search(k::Int)::Bool
-        k > ns && return true
-        row = sel_rows[k]
-        lo, hi = row_ptr[row] + 1, row_ptr[row + 1]
-        @inbounds for kk in lo:hi; rem_nnz[row_col[kk]] -= 1; end
+# State of _tu_partition's search. The two recursions are top-level functions
+# taking it as an argument: as nested closures that call themselves they were
+# boxed (Core.Box), and every recursive call was dynamically dispatched.
+struct _PartitionState
+    row_ptr::Vector{Int}
+    row_col::Vector{Int}
+    row_val::Vector{Int}
+    proc_sum::Vector{Int}
+    rem_nnz::Vector{Int}
+    sel_rows::Vector{Int}
+    ns::Base.RefValue{Int}       # number of rows selected so far
+    r::Int
+end
 
-        good = true                                             # sign +1
+# Sign search for sel_rows[k..ns]; proc_sum/rem_nnz reflect rows < k signed.
+function _partition_search(st::_PartitionState, k::Int)::Bool
+    k > st.ns[] && return true
+    row_ptr, row_col, row_val = st.row_ptr, st.row_col, st.row_val
+    proc_sum, rem_nnz = st.proc_sum, st.rem_nnz
+    row = st.sel_rows[k]
+    lo, hi = row_ptr[row] + 1, row_ptr[row + 1]
+    @inbounds for kk in lo:hi; rem_nnz[row_col[kk]] -= 1; end
+
+    good = true                                             # sign +1
+    @inbounds for kk in lo:hi
+        j = row_col[kk]
+        proc_sum[j] += row_val[kk]
+        abs(proc_sum[j]) > 1 + rem_nnz[j] && (good = false)
+    end
+    found = good && _partition_search(st, k + 1)
+    @inbounds for kk in lo:hi; proc_sum[row_col[kk]] -= row_val[kk]; end
+
+    if !found && k > 1                                      # sign −1 (skip for first: +1 WLOG)
+        good = true
         @inbounds for kk in lo:hi
             j = row_col[kk]
-            proc_sum[j] += row_val[kk]
+            proc_sum[j] -= row_val[kk]
             abs(proc_sum[j]) > 1 + rem_nnz[j] && (good = false)
         end
-        found = good && search(k + 1)
-        @inbounds for kk in lo:hi; proc_sum[row_col[kk]] -= row_val[kk]; end
-
-        if !found && k > 1                                      # sign −1 (skip for first: +1 WLOG)
-            good = true
-            @inbounds for kk in lo:hi
-                j = row_col[kk]
-                proc_sum[j] -= row_val[kk]
-                abs(proc_sum[j]) > 1 + rem_nnz[j] && (good = false)
-            end
-            found = good && search(k + 1)
-            @inbounds for kk in lo:hi; proc_sum[row_col[kk]] += row_val[kk]; end
-        end
-
-        @inbounds for kk in lo:hi; rem_nnz[row_col[kk]] += 1; end
-        return found
+        found = good && _partition_search(st, k + 1)
+        @inbounds for kk in lo:hi; proc_sum[row_col[kk]] += row_val[kk]; end
     end
 
-    # Enumerate all 2^r subsets R (exclude-first: small violators found early);
-    # rem_nnz is maintained incrementally as rows join the subset.
-    function enum_subsets(row::Int)::Bool
-        row > r && return search(1)
-        enum_subsets(row + 1) || return false                   # exclude
-        ns += 1; sel_rows[ns] = row                             # include
-        for k in row_ptr[row]+1:row_ptr[row+1]
-            @inbounds rem_nnz[row_col[k]] += 1; end
-        result = enum_subsets(row + 1)
-        for k in row_ptr[row]+1:row_ptr[row+1]
-            @inbounds rem_nnz[row_col[k]] -= 1; end
-        ns -= 1
-        result
-    end
+    @inbounds for kk in lo:hi; rem_nnz[row_col[kk]] += 1; end
+    return found
+end
 
-    enum_subsets(1)
+# Enumerate all 2^r subsets R (exclude-first: small violators found early);
+# rem_nnz is maintained incrementally as rows join the subset.
+function _partition_subsets(st::_PartitionState, row::Int)::Bool
+    row > st.r && return _partition_search(st, 1)
+    _partition_subsets(st, row + 1) || return false         # exclude
+    st.ns[] += 1; st.sel_rows[st.ns[]] = row                # include
+    lo, hi = st.row_ptr[row] + 1, st.row_ptr[row + 1]
+    @inbounds for k in lo:hi; st.rem_nnz[st.row_col[k]] += 1; end
+    result = _partition_subsets(st, row + 1)
+    @inbounds for k in lo:hi; st.rem_nnz[st.row_col[k]] -= 1; end
+    st.ns[] -= 1
+    result
 end
 
 """
@@ -2354,80 +2382,100 @@ function _tu_eulerian(M::Matrix{Int}, max_k::Int = typemax(Int);
         for j in 1:c; iszero(M[i, j]) && continue; ptr += 1; row_col2[ptr] = j; end
     end
 
-    col_nz   = zeros(Int, c)    # nonzeros per column in currently selected rows
-    row_nz   = zeros(Int, r)    # nonzeros per row in currently selected columns
-    sub_rows = zeros(Int, r)    # sub_rows[1..k] = selected row indices
-    use_cols = zeros(Int, c)    # usable column indices (even col_nz)
-    col_sel  = zeros(Int, c)    # col_sel[1..k] = index-into-use_cols of chosen col
-    sum_ent  = Ref(0)           # sum of entries in selected k×k submatrix
-
-    # Pick k−n_sel more columns from use_cols[1..n_use]; n_sel already chosen.
-    function enum_cols(k::Int, n_sel::Int, n_use::Int)::Bool
-        if n_sel < k
-            first = n_sel == 0 ? 1 : col_sel[n_sel] + 1
-            last  = n_use - (k - n_sel) + 1
-            for u in first:last
-                work[] < 0 && return true
-                col = use_cols[u]
-                for s in 1:k                                    # update row_nz / sum
-                    v = M[sub_rows[s], col]
-                    if v != 0; sum_ent[] += v; row_nz[sub_rows[s]] += 1; end
-                end
-                col_sel[n_sel + 1] = u
-                enum_cols(k, n_sel + 1, n_use) || return false
-                for s in 1:k                                    # restore
-                    v = M[sub_rows[s], col]
-                    if v != 0; sum_ent[] -= v; row_nz[sub_rows[s]] -= 1; end
-                end
-            end
-            return true
-        else
-            # Columns are Eulerian by construction (selected from use_cols).
-            # Check whether rows are also Eulerian and sum ≢ 0 mod 4.
-            work[] -= 1
-            sum_ent[] % 4 == 0 && return true
-            for s in 1:k
-                row_nz[sub_rows[s]] % 2 == 0 || return true    # row not Eulerian → ok
-            end
-            return false                                        # Eulerian + sum ≢ 0 mod 4
-        end
-    end
-
-    # Pick k−n_sel more rows from 1..r; n_sel already chosen.
-    function enum_rows(k::Int, n_sel::Int)::Bool
-        if n_sel < k
-            first = n_sel == 0 ? 1 : sub_rows[n_sel] + 1
-            last  = r - (k - n_sel) + 1
-            for row in first:last
-                work[] < 0 && return true
-                sub_rows[n_sel + 1] = row
-                for k2 in row_ptr2[row]+1:row_ptr2[row+1]       # sparse update
-                    @inbounds col_nz[row_col2[k2]] += 1; end
-                enum_rows(k, n_sel + 1) || return false
-                for k2 in row_ptr2[row]+1:row_ptr2[row+1]       # sparse restore
-                    @inbounds col_nz[row_col2[k2]] -= 1; end
-            end
-            return true
-        else
-            # k rows chosen. Usable columns = those with even, nonzero count
-            # of nonzeros. A column that is zero on the chosen rows can be
-            # skipped: every minimal non-TU submatrix is Eulerian with sum
-            # ≡ 2 (mod 4) and is nonsingular, so it has no zero column — the
-            # criterion stays exact, and sparse matrices lose most candidates.
-            n_use = 0
-            work[] -= c
-            for j in 1:c
-                if col_nz[j] > 0 && col_nz[j] % 2 == 0; n_use += 1; use_cols[n_use] = j; end
-            end
-            n_use < k && return true                            # too few usable cols
-            enum_cols(k, 0, n_use)
-        end
-    end
-
+    st = _EulerState(M, row_ptr2, row_col2,
+                     zeros(Int, c),    # col_nz: nonzeros per column in currently selected rows
+                     zeros(Int, r),    # row_nz: nonzeros per row in currently selected columns
+                     zeros(Int, r),    # sub_rows[1..k] = selected row indices
+                     zeros(Int, c),    # use_cols: usable column indices (even col_nz)
+                     zeros(Int, c),    # col_sel[1..k] = index-into-use_cols of chosen col
+                     Ref(0),           # sum of entries in selected k×k submatrix
+                     work, r, c)
     for k in 2:min(min(r, c), max_k)
-        enum_rows(k, 0) || return false
+        _euler_rows(st, k, 0) || return false
     end
     true
+end
+
+# State of _tu_eulerian's search. As in _PartitionState, the recursions are
+# top-level functions rather than nested closures, which would be boxed.
+struct _EulerState
+    M::Matrix{Int}
+    row_ptr2::Vector{Int}
+    row_col2::Vector{Int}
+    col_nz::Vector{Int}
+    row_nz::Vector{Int}
+    sub_rows::Vector{Int}
+    use_cols::Vector{Int}
+    col_sel::Vector{Int}
+    sum_ent::Base.RefValue{Int}
+    work::Base.RefValue{Int}
+    r::Int
+    c::Int
+end
+
+# Pick k−n_sel more columns from use_cols[1..n_use]; n_sel already chosen.
+function _euler_cols(st::_EulerState, k::Int, n_sel::Int, n_use::Int)::Bool
+    M, sub_rows, row_nz, sum_ent, work = st.M, st.sub_rows, st.row_nz, st.sum_ent, st.work
+    if n_sel < k
+        first = n_sel == 0 ? 1 : st.col_sel[n_sel] + 1
+        last  = n_use - (k - n_sel) + 1
+        for u in first:last
+            work[] < 0 && return true
+            col = st.use_cols[u]
+            for s in 1:k                                    # update row_nz / sum
+                v = M[sub_rows[s], col]
+                if v != 0; sum_ent[] += v; row_nz[sub_rows[s]] += 1; end
+            end
+            st.col_sel[n_sel + 1] = u
+            _euler_cols(st, k, n_sel + 1, n_use) || return false
+            for s in 1:k                                    # restore
+                v = M[sub_rows[s], col]
+                if v != 0; sum_ent[] -= v; row_nz[sub_rows[s]] -= 1; end
+            end
+        end
+        return true
+    else
+        # Columns are Eulerian by construction (selected from use_cols).
+        # Check whether rows are also Eulerian and sum ≢ 0 mod 4.
+        work[] -= 1
+        sum_ent[] % 4 == 0 && return true
+        for s in 1:k
+            row_nz[sub_rows[s]] % 2 == 0 || return true    # row not Eulerian → ok
+        end
+        return false                                        # Eulerian + sum ≢ 0 mod 4
+    end
+end
+
+# Pick k−n_sel more rows from 1..r; n_sel already chosen.
+function _euler_rows(st::_EulerState, k::Int, n_sel::Int)::Bool
+    sub_rows, col_nz, row_ptr2, row_col2, work = st.sub_rows, st.col_nz, st.row_ptr2, st.row_col2, st.work
+    if n_sel < k
+        first = n_sel == 0 ? 1 : sub_rows[n_sel] + 1
+        last  = st.r - (k - n_sel) + 1
+        for row in first:last
+            work[] < 0 && return true
+            sub_rows[n_sel + 1] = row
+            for k2 in row_ptr2[row]+1:row_ptr2[row+1]       # sparse update
+                @inbounds col_nz[row_col2[k2]] += 1; end
+            _euler_rows(st, k, n_sel + 1) || return false
+            for k2 in row_ptr2[row]+1:row_ptr2[row+1]       # sparse restore
+                @inbounds col_nz[row_col2[k2]] -= 1; end
+        end
+        return true
+    else
+        # k rows chosen. Usable columns = those with even, nonzero count
+        # of nonzeros. A column that is zero on the chosen rows can be
+        # skipped: every minimal non-TU submatrix is Eulerian with sum
+        # ≡ 2 (mod 4) and is nonsingular, so it has no zero column — the
+        # criterion stays exact, and sparse matrices lose most candidates.
+        n_use = 0
+        work[] -= st.c
+        for j in 1:st.c
+            if col_nz[j] > 0 && col_nz[j] % 2 == 0; n_use += 1; st.use_cols[n_use] = j; end
+        end
+        n_use < k && return true                            # too few usable cols
+        _euler_cols(st, k, 0, n_use)
+    end
 end
 
 # ──────────────────────────────────────────────────────────────────────────────

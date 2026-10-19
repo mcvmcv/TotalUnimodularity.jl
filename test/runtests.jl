@@ -68,8 +68,9 @@ include("test_cmr.jl")
         @test pivot([1 1; 1 0], 1) == [-1 1; 1 -1]
         @test pivot([1 1; 1 0], 2) == -[0 1; 1 -1]
         # 3-sum summands too small to contain Am / Bm.
-        @test_throws ErrorException three_sum([1 1; 0 1], [1 0 1; 1 1 0])
-        @test_throws ErrorException three_sum([1 1 1; 1 0 1], [1 0; 1 1])
+        @test_throws ArgumentError three_sum([1 1; 0 1], [1 0 1; 1 1 0])
+        @test_throws ArgumentError three_sum([1 1 1; 1 0 1], [1 0; 1 1])
+        @test_throws ArgumentError one_sum([1;;], [1 1; 1 1])
     end
 
     @testset "generic integer matrix inputs (sums and pivot)" begin
@@ -458,3 +459,5 @@ include("test_cmr.jl")
     end
 
 end
+
+include("extra_tests.jl")

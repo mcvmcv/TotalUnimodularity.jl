@@ -297,8 +297,9 @@ measured here.
 Rank computations avoid floating-point SVD entirely: the hot paths use
 Float64 Gaussian elimination (exact for the small {-1,0,1} matrices arising
 here) with rank caching, and exact Bareiss integer elimination elsewhere.
-`is_totally_unimodular` accepts any `AbstractMatrix` with integer-valued
-entries.
+`is_totally_unimodular` accepts any `AbstractMatrix` of real numbers,
+including `Float64` and sparse matrices as found in optimisation models; an
+entry other than -1, 0 or 1 gives `false`.
 
 For verification on small matrices, `algorithm = :naive` checks the
 definition directly, in exponential time.
@@ -330,8 +331,7 @@ network matrices, their transposes, F_1, and F_2 via 1-sums, 2-sums, and
 3-sums. This characterisation leads to a polynomial-time recognition
 algorithm described in Schrijver (1986).
 
-This package provides the only known pure Julia implementation of this
-algorithm.
+No other Julia implementation of this algorithm is known to the author.
 
 ## References
 
