@@ -870,9 +870,8 @@ function _decompose(M::Matrix{Int})::Tuple{Bool, NTuple{4, Matrix{Int}}}
     full_cols = (UInt16(1) << n) - UInt16(1)
 
     # Two-pass search: pass 1 only accepts rB+rC ≤ 1 (2-sums), pass 2
-    # accepts rB+rC ≤ 2 (3-sums and pivots). Preferring 2-sums avoids
-    # choosing pivots that can cause the recursion to cycle back to a
-    # matrix already in `seen`.
+    # accepts rB+rC ≤ 2 (3-sums and pivots). Preferring 2-sums keeps Case 4
+    # to blocks that have no 2-separation with sides of at least 4.
     for pass in 1:2
         max_sum = pass == 1 ? 1 : 2
         for rt_mask in UInt16(1):(UInt16(1) << m) - UInt16(2)
@@ -1877,8 +1876,8 @@ false
 function is_totally_unimodular(M::Matrix{Int}; algorithm::Symbol = :decomposition)::Bool
     _check_algorithm(algorithm)
     all(x -> -1 <= x <= 1, M) || return false
-    algorithm === :decomposition && return _is_tu_recursive(M, 0, Set{Matrix{Int}}(), true)
-    algorithm === :exhaustive && return _is_tu_recursive(M, 0, Set{Matrix{Int}}(), false)
+    algorithm === :decomposition && return _is_tu_recursive(M, true)
+    algorithm === :exhaustive && return _is_tu_recursive(M, false)
     algorithm === :eulerian && return _tu_eulerian(M)
     algorithm === :partition && return _tu_partition(M)
     return _tu_naive(M)
@@ -1901,24 +1900,15 @@ _check_algorithm(a::Symbol) = a in _ALGORITHMS ||
                         join(repr.(_ALGORITHMS), ", ") * "."))
 
 # How often the decomposition could not proceed and the exact Ghouila-Houri
-# test decided instead: more than 100 nested pivots (`depth`), a matrix
-# repeated on the recursion path (`cycle`), or a 3-sum whose sign ε could not
-# be determined (`epsilon`). The test is exponential, so each fallback warns
-# with the reason and the size: on a large input it explains a stall. The
-# test suite checks that all three stay at zero.
-#
-# Which of them can happen at all (see IMPLEMENTATION_NOTES.md):
-#   * `cycle`: never. Every recursive call is on a matrix with strictly fewer
-#     rows plus columns, so no matrix can repeat on the path.
-#   * `depth`: only on a matrix whose decomposition nests more than 100
-#     Case 5/6 pivots, which needs a chain of over 100 3-sums. Measured depth
-#     is at most 1 on the benchmark family up to 378×376.
-#   * `epsilon`: never on the default route, where the block has no
-#     2-separation. On the :exhaustive route a ≤12×12 block can have one with
-#     a side of 3 elements, which `_decompose` does not look for, so there it
-#     is not ruled out.
-const _FALLBACKS = (depth = Threads.Atomic{Int}(0), cycle = Threads.Atomic{Int}(0),
-                    epsilon = Threads.Atomic{Int}(0))
+# test decided instead: a 3-sum whose sign ε could not be determined. That
+# needs a 2-separation of the block (see IMPLEMENTATION_NOTES.md), so it
+# cannot happen on the default route, where Case 4 only sees blocks without
+# one. On the :exhaustive route a ≤12×12 block can have one with a side of 3
+# elements, which `_decompose` does not look for, so there it is not ruled
+# out. The test is exponential, so a fallback warns with the reason and the
+# size: on a large input it explains a stall. The test suite checks that the
+# count stays at zero.
+const _FALLBACKS = (epsilon = Threads.Atomic{Int}(0),)
 
 function _fallback(M::Matrix{Int}, reason::Symbol)::Bool
     Threads.atomic_add!(getfield(_FALLBACKS, reason), 1)
@@ -1929,37 +1919,27 @@ function _fallback(M::Matrix{Int}, reason::Symbol)::Bool
     _tu_partition(M)
 end
 
-function _is_tu_recursive(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, fast::Bool)::Bool
+# The recursion terminates: every recursive call is on a matrix with strictly
+# fewer rows plus columns (see "Termination, and the one remaining fallback" in
+# IMPLEMENTATION_NOTES.md). A 1-sum component is a proper part of M; a 2-sum
+# piece has its side's element count plus 1, and each side has at least 2; a
+# 3-sum piece has its side's count plus 3, and each side has at least 4; and
+# Cases 5/6 do not recurse on the pivoted matrix but go straight to Case 4 on
+# a split with the same side sizes.
+function _is_tu_recursive(M::Matrix{Int}, fast::Bool)::Bool
     ok, M = _reduce(M)
     ok || return false
     (size(M, 1) == 0 || size(M, 2) == 0) && return true
-    # `depth` counts pivot steps (Cases 5/6) only: every sum case recurses on
-    # strictly smaller matrices, so only pivots can run away. Runaway
-    # recursion says nothing about M; decide it exactly instead.
-    depth > 100 && return _fallback(M, :depth)
 
     # 1-sum: split into connected components and test each independently.
     # O(m·n) bipartite BFS — far cheaper than any subsequent step.
     let comps = _bipartite_components(M)
         if comps !== nothing
-            return all(((rows, cols),) -> _is_tu_recursive(M[rows, cols], depth, seen, fast), comps)
+            return all(((rows, cols),) -> _is_tu_recursive(M[rows, cols], fast), comps)
         end
     end
 
-    # Cycle detection: `seen` holds the matrices on the *current* recursion
-    # path only. Membership would mean the recursion had come back to an
-    # ancestor, which says nothing about whether M is TU, so M would be
-    # decided exactly with the Ghouila-Houri test instead. Since the pivot
-    # cases (5/6) keep the split they pivot on, every recursive call is on a
-    # strictly smaller matrix and this cannot happen (see _FALLBACKS); it
-    # used to, e.g. degenerate 3-sum retry ↔ rank-2 pivot, before that.
-    # Each matrix is removed once its subtree is done — identical matrices in
-    # sibling branches (e.g. duplicate blocks of a 1-sum) are legitimate.
-    M in seen && return _fallback(M, :cycle)
-    push!(seen, M)
-    result = _is_tu_irreducible(M, depth, seen, fast)
-    delete!(seen, M)
-    return result
+    return _is_tu_irreducible(M, fast)
 end
 
 # Blocks whose smaller dimension is at most this are decided by the exact
@@ -1970,9 +1950,8 @@ end
 # exact test on small matrices.
 const _PARTITION_MAX_DIM = Ref(8)
 
-# TU test for a matrix that is already reduced, connected, and not on the
-# current recursion path.
-function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, fast::Bool)::Bool
+# TU test for a matrix that is already reduced and connected.
+function _is_tu_irreducible(M::Matrix{Int}, fast::Bool)::Bool
     _is_network_matrix(M) && return true
     _is_network_matrix(Matrix{Int}(M')) && return true
     _is_special_matrix(M) && return true
@@ -1992,7 +1971,7 @@ function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, 
             R2 = setdiff(1:m, R1)
             C2 = setdiff(1:n, C1)
             return _apply_decomposition(M, M[R1, C1], M[R1, C2], M[R2, C1], M[R2, C2],
-                                        1, 0, depth, seen, fast)
+                                        1, 0, fast)
         end
     end
 
@@ -2021,8 +2000,7 @@ function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, 
         R2 = setdiff(1:m, R1)
         C2 = setdiff(1:n, C1)
         A, B, C, D = M[R1, C1], M[R1, C2], M[R2, C1], M[R2, C2]
-        return _apply_decomposition(M, A, B, C, D, _rank_int(B), _rank_int(C),
-                                    depth, seen, fast)
+        return _apply_decomposition(M, A, B, C, D, _rank_int(B), _rank_int(C), fast)
     end
 
     # Exhaustive search, ≤12×12 only: no separation means not TU.
@@ -2031,19 +2009,18 @@ function _is_tu_irreducible(M::Matrix{Int}, depth::Int, seen::Set{Matrix{Int}}, 
 
     rB = _rank_int(B)
     rC = _rank_int(C)
-    return _apply_decomposition(M, A, B, C, D, rB, rC, depth, seen, fast)
+    return _apply_decomposition(M, A, B, C, D, rB, rC, fast)
 end
 
 # Continue Cases 5/6 after the pivot: P is the pivoted matrix and (R1, C1),
 # (R2, C2) the split carried over from before the pivot, which has
 # rank(B) = rank(C) = 1 there.
-function _apply_pivoted(P::Matrix{Int}, R1, C1, R2, C2,
-                        depth::Int, seen::Set{Matrix{Int}}, fast::Bool)::Bool
+function _apply_pivoted(P::Matrix{Int}, R1, C1, R2, C2, fast::Bool)::Bool
     A, B, C, D = P[R1, C1], P[R1, C2], P[R2, C1], P[R2, C2]
     rB, rC = _rank_int(B), _rank_int(C)
     (rB == 1 && rC == 1) ||
         error("split of the pivoted matrix has rank(B) = $rB, rank(C) = $rC, expected 1 and 1")
-    _apply_decomposition(P, A, B, C, D, 1, 1, depth + 1, seen, fast)
+    _apply_decomposition(P, A, B, C, D, 1, 1, fast)
 end
 
 # Dispatch on the rank case of a decomposition M = [A B; C D] of a reduced,
@@ -2051,20 +2028,19 @@ end
 function _apply_decomposition(M::Matrix{Int},
                                A::Matrix{Int}, B::Matrix{Int},
                                C::Matrix{Int}, D::Matrix{Int},
-                               rB::Int, rC::Int,
-                               depth::Int, seen::Set{Matrix{Int}}, fast::Bool)::Bool
+                               rB::Int, rC::Int, fast::Bool)::Bool
     if rB == 0 && rC == 0
-        return _is_tu_recursive(A, depth, seen, fast) && _is_tu_recursive(D, depth, seen, fast)
+        return _is_tu_recursive(A, fast) && _is_tu_recursive(D, fast)
 
     elseif rB == 1 && rC == 0
         f, g = _extract_rank1(B)
-        return _is_tu_recursive([A f], depth, seen, fast) &&
-               _is_tu_recursive([g; D], depth, seen, fast)
+        return _is_tu_recursive([A f], fast) &&
+               _is_tu_recursive([g; D], fast)
 
     elseif rB == 0 && rC == 1
         f, g = _extract_rank1(C)
-        return _is_tu_recursive([A; g], depth, seen, fast) &&
-               _is_tu_recursive([f D], depth, seen, fast)
+        return _is_tu_recursive([A; g], fast) &&
+               _is_tu_recursive([f D], fast)
 
     elseif rB == 1 && rC == 1
         # Case 4 needs M to be reduced, connected and free of 2-separations,
@@ -2134,8 +2110,8 @@ function _apply_decomposition(M::Matrix{Int},
         mat2 = [ε₁                   0                     ones(Int,1,nBK)       zeros(Int,1,nnotBK)
                 ones(Int,nCR,1)      ones(Int,nCR,1)       D1                    D2
                 zeros(Int,nnotCR,1)  zeros(Int,nnotCR,1)   D3                    D4   ]
-        return _is_tu_recursive(mat1, depth, seen, fast) &&
-               _is_tu_recursive(mat2, depth, seen, fast)
+        return _is_tu_recursive(mat1, fast) &&
+               _is_tu_recursive(mat2, fast)
 
     elseif rB == 2 && rC == 0
         # Case 5: pivot on a nonzero of B. A pivot exchanges the roles of its
@@ -2161,7 +2137,7 @@ function _apply_decomposition(M::Matrix{Int},
         all(x -> -1 <= x <= 1, P) || return false
         R1 = 2:rA;            C1 = 1:cA+1
         R2 = [1; rA+1:rA+rD]; C2 = cA+2:size(P, 2)
-        return _apply_pivoted(P, R1, C1, R2, C2, depth, seen, fast)
+        return _apply_pivoted(P, R1, C1, R2, C2, fast)
 
     elseif rB == 0 && rC == 2
         # Case 6: as Case 5, pivoting on a nonzero of C. The pivot row now
@@ -2179,7 +2155,7 @@ function _apply_decomposition(M::Matrix{Int},
         all(x -> -1 <= x <= 1, P) || return false
         R1 = 1:rA+1;                 C1 = 2:cA
         R2 = rA+2:size(P, 1);        C2 = [1; cA+1:cA+cD]
-        return _apply_pivoted(P, R1, C1, R2, C2, depth, seen, fast)
+        return _apply_pivoted(P, R1, C1, R2, C2, fast)
 
     else
         error("Unexpected rank(B) + rank(C) = $(rB + rC)")

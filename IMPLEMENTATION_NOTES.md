@@ -69,8 +69,10 @@ guard returned `false`, which produced false negatives on TU matrices (see
 Bug 8).
 
 Cases 5/6 no longer search the pivoted matrix (see "Cases 5/6 carry the
-split through the pivot" below), which removes the source of these cycles;
-the guard stays as a safeguard.
+split through the pivot" below), which removes the source of these cycles.
+Every recursive call is now on a strictly smaller matrix (see "Termination"
+under Known Limitations), so the guard and the `seen` set were removed in
+October 2026, together with the pivot-depth cap.
 
 ### `_is_trivial_vector` definition
 The initial implementation checked `count(!iszero, v) == 1 && all(x -> x in (0,1), v)`,
@@ -214,57 +216,56 @@ through both routes. The matroid-intersection search (`_decompose_matroid`,
 `_solve_submodular` and their rank caches) was removed once nothing could
 reach it; `_decompose` now refuses matrices above 12×12.
 
-`_tu_partition` remains as a fallback in three places: a matrix repeated on
-the recursion path, more than 100 nested pivots, and `_find_epsilon` finding
-no R–K path. They go through `_fallback`, which counts them in
+### Termination, and the one remaining fallback
+Every recursive call of `_is_tu_recursive` is on a matrix with strictly
+fewer rows plus columns, so the recursion terminates and no matrix can come
+back on a recursion path. Call the number of rows plus columns of a side its
+element count. A 1-sum component is a proper part of the matrix. A 2-sum
+piece has the element count of its side plus 1, and each side of a
+2-separation has at least 2. A 3-sum piece (Case 4) has the element count of
+its side plus 3, and each side has at least 4: `_find_three_separation`
+takes closed sets of 2 to N − 6 of the N − 4 free nodes, plus 2 fixed
+elements per side, and `_decompose` requires 4. Cases 5/6 do not recurse on
+the pivoted matrix: they move the pivot row to one side and the pivot column
+to the other, so both element counts stay the same, and go straight to
+Case 4 on that split. `_reduce` only removes rows and columns.
+
+Until October 2026 there were two more guards, both falling back to the
+exponential `_tu_partition`: a `seen` set of the matrices on the recursion
+path (a repeat meant no progress), and a cap of 100 nested Case 5/6 pivots.
+By the argument above the first could never fire, and the second could only
+fire on a chain of over 100 nested rank-2 3-sums, where it would have caused
+the stall it was meant to prevent (measured pivot depth was at most 1, up to
+378×376 and after 200 random pivots). Both were removed; hashing every
+matrix into `seen` had cost nothing measurable.
+
+`_tu_partition` remains as a fallback in one place: `_find_epsilon` finding
+no R–K path in Case 4. It goes through `_fallback`, which counts it in
 `_FALLBACKS` and emits a warning naming the reason and the block size (at
-most 10 per session); the last testset of the suite checks that the counts
-did not move, and `benchmark/fuzz_cmr.jl` prints them. None has fired since
-the pivot change below: in October 2026, 125,000 fuzz inputs (structured
-small matrices with the search route forced and with default routing, the
-3-connected family against the exact test and against CMR) were run with
-every fallback logged, and none fired. If one does on a large block, the run
-stalls, as the test is exponential — the warning says why.
+most 10 per session); the last testset of the suite checks that the count
+did not move, and `benchmark/fuzz_cmr.jl` prints it. None of the fallbacks
+has fired since the pivot change below: in October 2026, 125,000 fuzz inputs
+were run with every fallback logged before the guards were removed, and
+65,000 after.
 
-Whether each can be reached:
-
-* **cycle: no.** Every recursive call of `_is_tu_recursive` is on a matrix
-  with strictly fewer rows plus columns. Call the number of rows plus
-  columns of a side its element count. A 1-sum component is a proper part
-  of the matrix. A 2-sum piece has the element count of its side plus 1, and
-  each side of a 2-separation has at least 2. A 3-sum piece (Case 4) has
-  the element count of its side plus 3, and each side has at least 4:
-  `_find_three_separation` takes closed sets of 2 to N − 6 of the N − 4
-  free nodes, plus 2 fixed elements per side, and `_decompose` requires
-  4. Cases 5/6 do not recurse on the pivoted matrix: they move the pivot
-  row to one side and the pivot column to the other, so both element counts
-  stay the same, and go straight to Case 4 on that split. `_reduce` only
-  removes rows and columns. So the matrices on a recursion path have
-  strictly decreasing size, and none can repeat.
-* **depth: only on very deep 3-sum chains.** By the same argument the
-  recursion terminates without the cap, and the depth counts Case 5/6
-  pivots on one path. More than 100 of them needs a decomposition with over
-  100 nested rank-2 3-separations, so a matrix with hundreds of rows
-  arranged as a long chain of 3-sums. On the benchmark family the depth was
-  at most 1, up to 378×376 and after 200 random pivots. The cap is not
-  needed for termination, and where it fires it causes the stall it was
-  meant to prevent; it could be removed.
-* **epsilon: not on the default route.** Suppose `_find_epsilon(A, R, K)`
-  finds no path from R (rows of A meeting B) to K (columns of A meeting
-  C). Let X be the rows and columns of A reachable from R. X misses K, and A
-  has no nonzero between X and the rest of A, so moving the rest of A to side 2
-  leaves a cross block of rank 1 on side 1 (the rows of B in X) and a zero
-  one on side 2 (C lives in the columns of K): a 2-separation, provided X
-  has at least 2 elements. If X is a single row r, then R = {r} and row r is
-  zero in A; moving r alone to side 2 makes B zero and leaves C rank 1, a
-  2-separation with sides of at least 3 and 5. So no path implies a
-  2-separation of M. On the default route Case 4 only sees blocks that
-  `_find_two_separation` (which is complete) found none in, or their
-  pivots, which have the same separations. On the `:exhaustive` route
-  (blocks up to 12×12 only) `_decompose` only looks for 2-separations with
-  sides of at least 4, and a reduced matrix can have one with a side of 3
-  (rows equal outside one column, opposite in it), so there the argument
-  does not rule the fallback out; at that size it is cheap anyway.
+It cannot happen on the default route. Suppose `_find_epsilon(A, R, K)`
+finds no path from R (rows of A meeting B) to K (columns of A meeting C).
+Let X be the rows and columns of A reachable from R. X misses K, and A has
+no nonzero between X and the rest of A, so moving the rest of A to side 2
+leaves a cross block of rank 1 on side 1 (the rows of B in X) and a zero one
+on side 2 (C lives in the columns of K): a 2-separation, provided X has at
+least 2 elements. If X is a single row r, then R = {r} and row r is zero in
+A; moving r alone to side 2 makes B zero and leaves C rank 1, a 2-separation
+with sides of at least 3 and 5. So no path implies a 2-separation of M. On
+the default route Case 4 only sees blocks that `_find_two_separation` (which
+is complete) found none in, or their pivots, which have the same
+separations. On the `:exhaustive` route (blocks up to 12×12 only)
+`_decompose` only looks for 2-separations with sides of at least 4, and a
+reduced matrix can have one with a side of 3 (rows equal outside one column,
+opposite in it), so there the argument does not rule the fallback out; at
+that size it is cheap anyway. The fallback is kept on both routes rather
+than made an error on the default one: if the argument were wrong, a slow
+correct answer with a warning serves a user better than an exception.
 
 ### Precompilation workload
 The first call in a session used to compile the whole decision procedure,
@@ -466,13 +467,12 @@ each complete match: about 12 µs. It agrees with brute force (all
 permutation pairs and all 2¹⁰ sign vectors) on 6,000 perturbed copies of
 F_1 and F_2.
 
-### Recursion depth counts pivots only
+### No recursion depth limit
 `depth` used to be incremented on every recursive call, with a cutoff at
-100 that falls back to `_tu_partition`. A 2-sum chain of k blocks recurses
-k deep, so a chain of more than 100 blocks would hit the cutoff and hand a
-huge matrix to the exponential test. The sum cases (1–4) always recurse on strictly smaller
-matrices and cannot run away, so only the pivot cases (5/6) increment
-`depth` now.
+100 that fell back to `_tu_partition`. A 2-sum chain of k blocks recurses
+k deep, so a chain of more than 100 blocks hit the cutoff and handed a huge
+matrix to the exponential test. It was then restricted to the pivot cases
+(5/6), and in October 2026 removed altogether (see "Termination" above).
 
 ### Eulerian test skips zero columns
 For a fixed row subset, `_tu_eulerian` only considers columns with an even

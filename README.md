@@ -133,10 +133,10 @@ when no separation exists.
 
 The exact Ghouila-Houri partition test, exponential in the smaller
 dimension, remains in two places: for blocks whose smaller dimension is at
-most 8, where it is the faster option, and as a fallback when the
-decomposition cannot proceed (a repeated matrix on the recursion path, more
-than 100 nested pivots, or a 3-sum whose sign cannot be determined). The
-package counts these fallbacks, and the test suite checks that none occurs.
+most 8, where it is the faster option, and as a fallback when the sign of
+a 3-sum cannot be determined, which needs a 2-separation and so cannot
+happen on the default route. The package warns about and counts such
+fallbacks, and the test suite checks that none occurs.
 
 In practice: matrices that split into small pieces and network matrices
 are decided in milliseconds to a tenth of a second at sizes of several

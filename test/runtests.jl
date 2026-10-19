@@ -453,9 +453,9 @@ include("test_cmr.jl")
 
     # A fallback that does happen says so, as on a large block it can stall.
     @testset "fallback warns" begin
-        @test (@test_logs (:warn, r"could not continue \(cycle\) on a 3×3 block") match_mode=:any TotalUnimodularity._fallback(
-            [1 1 0; 0 1 1; 1 0 1], :cycle)) == false
-        Threads.atomic_sub!(TotalUnimodularity._FALLBACKS.cycle, 1)
+        @test (@test_logs (:warn, r"could not continue \(epsilon\) on a 3×3 block") match_mode=:any TotalUnimodularity._fallback(
+            [1 1 0; 0 1 1; 1 0 1], :epsilon)) == false
+        Threads.atomic_sub!(TotalUnimodularity._FALLBACKS.epsilon, 1)
     end
 
 end

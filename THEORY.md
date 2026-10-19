@@ -191,15 +191,16 @@ partition with rank(B) = rank(C) = 1, and Case 4 is applied to it.
 **Case 6:** rank(B) = 0, rank(C) = 2
 Symmetric to Case 5, pivot on a nonzero entry of C.
 
-### Cycle Detection
+### Termination
 If the pivoted matrix of Cases 5 and 6 is searched for a decomposition
 afresh, the search can return another Case 5/6 partition and pivot straight
 back. The implementation avoids this by carrying the partition through the
 pivot (see "3-separations in polynomial time" below), so the pivoted matrix
-goes to Case 4 directly. As a safeguard the matrices on the current
-recursion path are still recorded; if one is encountered again it is decided
-with the exact Ghouila-Houri test. A cycle says nothing about total
-unimodularity.
+goes to Case 4 directly. Then every recursive call is on a strictly smaller
+matrix: a 2-sum piece has one more element than its side and a 3-sum piece
+three more, while every side of a 2-separation has at least 2 elements and
+every side of a 3-separation at least 4, and the pivot keeps both side sizes.
+So the recursion terminates without any cycle check or depth limit.
 
 ### 2-separations in polynomial time
 Cases 2 and 3 (rank(B) + rank(C) = 1) do not need the general search of
@@ -292,9 +293,9 @@ partitions (`_decompose`), used as an independent check.
    See IMPLEMENTATION_NOTES.md for the routing and measurements.
 
 2. **Exponential fallback:** the exact Ghouila-Houri test decides blocks of
-   smaller dimension at most 8 and is the fallback when a matrix repeats on
-   the recursion path or the sign ε of a 3-sum cannot be determined. No
-   test input reaches the fallback on the current code.
+   smaller dimension at most 8 and is the fallback when the sign ε of a
+   3-sum cannot be determined. That needs a 2-separation of the block, so it
+   cannot happen on the default route, and no test input reaches it.
 
 ## References
 
