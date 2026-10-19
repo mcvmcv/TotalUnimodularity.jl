@@ -12,7 +12,7 @@ import TotalUnimodularity: _tu_partition, _gf2_rank_capped, _find_two_separation
                             _find_disconnected_gi,
                             _compute_w_sets, _build_h, _is_bipartite, _is_network_matrix,
                             _split_submatrices, _decompose, _extract_rank1,
-                            _find_epsilon, _det_int!
+                            _find_epsilon, _det_int!, _camion_violation
 
 # Known network matrix with ≥3 nonzeros per column
 const network_matrix = [1 0 1; -1 1 0; 0 -1 -1]
@@ -569,6 +569,55 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         A3 = [1 0; 0 1]
         ok, _ = _find_epsilon(A3, [1], [2])
         @test !ok
+    end
+
+    @testset "_camion_violation" begin
+        # An odd cycle longer than the 6-cycles of _tu_short_cycles: the
+        # whole matrix is the violation, with determinant 2.
+        k = 9
+        C = zeros(Int, k, k)
+        for i in 1:k; C[i, i] = 1; C[i, mod1(i + 1, k)] = 1; end
+        @test _camion_violation(C) == (collect(1:k), collect(1:k))
+        # The same cycle signed as a network matrix is TU.
+        C[k, 1] = -1
+        @test _camion_violation(C) === nothing
+        # F₇ as a 0/1 matrix has a 6-cycle with entry sum 6. Its support
+        # has no TU signing, so some signing is Camion-signed but not TU,
+        # which is left to the decomposition.
+        @test _camion_violation([1 1 0 1; 1 0 1 1; 0 1 1 1]) == ([1, 2, 3], [1, 2, 3])
+        @test _camion_violation([1 1 0 1; 1 0 -1 1; 0 1 1 1]) === nothing
+        @test _camion_violation(zeros(Int, 3, 4)) === nothing
+        @test _camion_violation(zeros(Int, 0, 0)) === nothing
+
+        # Directed-graph incidence matrices are TU, so no violation. With a
+        # few signs flipped the support still has a TU signing, so the matrix
+        # is TU exactly when it is Camion-signed: every non-TU one must be
+        # caught, and every submatrix returned must have determinant ±2.
+        rng = MersenneTwister(1)
+        n_caught = 0
+        for _ in 1:1000
+            nv, ne = rand(rng, 3:9), rand(rng, 3:12)
+            M = zeros(Int, nv, ne)
+            for e in 1:ne
+                u, v = randperm(rng, nv)[1:2]
+                M[u, e] = 1; M[v, e] = -1
+            end
+            rand(rng, Bool) && (M = Matrix(M'))
+            @test _camion_violation(M) === nothing
+            for i in rand(rng, findall(!iszero, M), rand(rng, 1:3))
+                M[i] = -M[i]
+            end
+            v = _camion_violation(M)
+            if v === nothing
+                @test _tu_partition(M)
+            else
+                rows, cols = v
+                @test length(rows) == length(cols)
+                @test abs(_det_int!(M[rows, cols])) == 2
+                n_caught += 1
+            end
+        end
+        @test n_caught > 300
     end
     
 end

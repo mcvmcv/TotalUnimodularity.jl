@@ -1984,6 +1984,15 @@ function _is_tu_irreducible(M::Matrix{Int}, fast::Bool)::Bool
     # decides instead.
     _tu_short_cycles(M; budget = 4 * m * n * (m + n)) || return false
 
+    # Camion's signing test: a chordless cycle of any length whose entries
+    # sum to 2 (mod 4), found in O(min(m, n) · nnz) and checked by its
+    # determinant. It settles non-TU matrices whose support has a TU signing
+    # but whose signs are wrong, such as an odd cycle hidden in a bipartite
+    # graph, which would otherwise cost a full 3-separation search. A support
+    # with no TU signing (e.g. that of F₇) can have a signing that passes,
+    # which is left to the search.
+    _camion_violation(M) === nothing || return false
+
     if !legacy
         # Small blocks: the exact branch-and-prune Ghouila-Houri test is
         # exponential in the smaller dimension but faster than searching
@@ -2277,6 +2286,138 @@ function _partition_subsets(st::_PartitionState, row::Int)::Bool
     @inbounds for k in lo:hi; st.rem_nnz[st.row_col[k]] -= 1; end
     st.ns[] -= 1
     result
+end
+
+"""
+    _camion_violation(M)
+
+A square submatrix of `M` (entries in {-1, 0, 1}) with determinant ±2, as
+`(rows, cols)`, or `nothing` if none is found. Not finding one does not mean
+`M` is TU.
+
+Camion's signing test, ported from CMR's
+`CMRcamionComputeSignSequentiallyConnected` (in test mode, without changing
+signs): the rows are added one at a time, and a breadth-first search from
+the first column of the new row, through the earlier rows only, reaches the
+columns of the new row in turn. Each time it reaches one, the search path
+back to the previous one closes a cycle through the new row that is
+chordless in the support graph. A cycle submatrix has determinant ±2 exactly
+when its entries sum to 2 (mod 4), and then it is returned. If no row closes
+such a cycle, `M` is Camion-signed: every TU matrix is, and a matrix that is
+not TU but is Camion-signed has a support that no signing makes TU, which is
+left to the decomposition.
+
+Every submatrix returned has its determinant checked exactly first, so a
+`false` built on this never depends on the cycle argument. Works over the
+smaller dimension; O(min(m, n) · nnz).
+"""
+function _camion_violation(M::Matrix{Int})::Union{Nothing, Tuple{Vector{Int}, Vector{Int}}}
+    m, n = size(M)
+    if m > n
+        v = _camion_violation(Matrix{Int}(M'))
+        return v === nothing ? nothing : (v[2], v[1])
+    end
+    # Number rows and columns in breadth-first order of the support graph,
+    # as CMR's block decomposition does: then every row after the first of
+    # its component meets a column of an earlier row, which the cycle
+    # argument needs. Run on the renumbered matrix and map the answer back.
+    ro, co = _bfs_order(M)
+    v = _camion_violation_ordered(M[ro, co])
+    return v === nothing ? nothing : (sort!(ro[v[1]]), sort!(co[v[2]]))
+end
+
+# Rows and columns of M in order of discovery by a breadth-first search of
+# its support graph, one component after another.
+function _bfs_order(M::Matrix{Int})::Tuple{Vector{Int}, Vector{Int}}
+    m, n = size(M)
+    row_seen = falses(m); col_seen = falses(n)
+    ro = Int[]; co = Int[]
+    queue = Int[]                          # rows as r, columns as m + c
+    for start in 1:m
+        row_seen[start] && continue
+        row_seen[start] = true; push!(ro, start); push!(queue, start)
+        head = 0
+        while head < length(queue)
+            v = queue[head += 1]
+            if v <= m
+                for c in 1:n
+                    (col_seen[c] || M[v, c] == 0) && continue
+                    col_seen[c] = true; push!(co, c); push!(queue, m + c)
+                end
+            else
+                c = v - m
+                for r in 1:m
+                    (row_seen[r] || M[r, c] == 0) && continue
+                    row_seen[r] = true; push!(ro, r); push!(queue, r)
+                end
+            end
+        end
+        empty!(queue)
+    end
+    append!(co, findall(!, col_seen))      # zero columns
+    ro, co
+end
+
+# _camion_violation on a matrix whose rows and columns are in BFS order.
+function _camion_violation_ordered(M::Matrix{Int})::Union{Nothing, Tuple{Vector{Int}, Vector{Int}}}
+    m, n = size(M)
+    row_sup = [findall(!iszero, @view M[r, :]) for r in 1:m]
+    col_sup = [findall(!iszero, @view M[:, c]) for c in 1:n]    # ascending rows
+    # Nodes: column c is c, row r is n + r.
+    status  = zeros(Bool, n + m)          # reached by the search
+    pred    = zeros(Int, n + m)           # predecessor on the search tree
+    predval = zeros(Int, n + m)           # entry of M on the edge to it
+    target  = zeros(Int, n)               # entry of the new row in column c
+    queue   = Vector{Int}(undef, n + m)
+    for row in 2:m
+        sup = row_sup[row]
+        isempty(sup) && continue
+        fill!(status, false)
+        fill!(target, 0)
+        for c in sup; target[c] = M[row, c]; end
+        start = sup[1]
+        status[start] = true
+        queue[1] = start
+        head, tail = 0, 1
+        while head < tail
+            v = queue[head += 1]
+            if v > n                              # a row: go to its columns
+                r = v - n
+                for c in row_sup[r]
+                    status[c] && continue
+                    status[c] = true
+                    pred[c] = v; predval[c] = M[r, c]
+                    queue[tail += 1] = c
+                    target[c] == 0 && continue
+                    # Reached a column of the new row: walk back to the
+                    # previous one, closing a cycle through the new row.
+                    s = target[c]
+                    rows = [row]; cols = [c]
+                    p = c
+                    while true
+                        s += predval[p]
+                        p = pred[p]
+                        p > n ? push!(rows, p - n) : push!(cols, p)
+                        (p <= n && target[p] != 0) && break
+                    end
+                    s += target[p]
+                    if mod(s, 4) != 0 && length(rows) == length(cols)
+                        sort!(rows); sort!(cols)
+                        abs(_det_int!(M[rows, cols])) > 1 && return (rows, cols)
+                    end
+                end
+            else                                  # a column: go to earlier rows
+                for r in col_sup[v]
+                    r >= row && break
+                    status[n + r] && continue
+                    status[n + r] = true
+                    pred[n + r] = v; predval[n + r] = M[r, v]
+                    queue[tail += 1] = n + r
+                end
+            end
+        end
+    end
+    return nothing
 end
 
 """

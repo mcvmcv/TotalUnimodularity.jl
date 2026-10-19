@@ -195,22 +195,32 @@ of a few thousand inputs; see "Structured fuzz" under Testing.
    hence the filter runs after the 2-sum split. A spent budget only means
    the search decides instead. Of the settings measured (no 3×3 pass, and
    budgets of ¼, 1 and 4 times m·n·(m+n)), the last was fastest overall;
-4. for a block with min(m,n) ≤ 8 (`_PARTITION_MAX_DIM`), the exact
+4. Camion's signing test `_camion_violation`, ported from CMR's
+   `CMRcamionComputeSignSequentiallyConnected`: rows are added in
+   breadth-first order of the support graph, and a search through the
+   earlier rows closes chordless cycles through each new one; a cycle whose
+   entries sum to 2 (mod 4) is a violation of any length, confirmed by its
+   determinant before `false` is returned. O(min(m,n)·nnz). It settles
+   non-TU blocks whose support has a TU signing but whose signs are wrong,
+   which the short-cycle filter misses beyond size 3 (see "Review tests"
+   below). On such a support it is complete: on 1,000 directed-graph
+   incidence matrices with 1–3 signs flipped it caught every non-TU one;
+5. for a block with min(m,n) ≤ 8 (`_PARTITION_MAX_DIM`), the exact
    branch-and-prune Ghouila-Houri test `_tu_partition`. Measured on TU blocks
    with no 2-separation, the search route below is level with it at 8 and
    ahead beyond: 4 ms against 6 ms at 15×13, 0.7 ms against 0.6 s at 21×19;
-5. `_find_three_separation` (see below). No separation means not TU, by
+6. `_find_three_separation` (see below). No separation means not TU, by
    Seymour's theorem; otherwise `_apply_decomposition` handles the split
    (Case 4 directly, Cases 5/6 through a pivot).
 
-Until October 2026 step 5 did not exist: blocks up to min-dimension 24 went
+Until October 2026 step 6 did not exist: blocks up to min-dimension 24 went
 to `_tu_partition` (about 13 s at 22, exponential), and larger ones to the
 matroid-intersection search of Theorem 20.2, O((m+n)^8), which never
 finished on anything of that size.
 
 The exhaustive ≤12×12 bipartition search in `_decompose` is used only with
 `fast = false`, i.e. `is_totally_unimodular(M; algorithm = :exhaustive)`,
-which also skips steps 2, 4 and 5 for those blocks. It is an independent
+which also skips steps 2, 5 and 6 for those blocks. It is an independent
 implementation of the search, and every oracle and regression test runs
 through both routes. The matroid-intersection search (`_decompose_matroid`,
 `_solve_submodular` and their rank caches) was removed once nothing could
@@ -570,12 +580,12 @@ types (sparse, UInt8, BigInt, Bool, views, Float64, Rational, NaN),
 metamorphic variants that preserve TU-ness either way, a threaded run, and
 Aqua. CI runs the suite with 4 threads.
 
-The largest odd-edge graph (240×360, not TU) takes 2–11 s, where CMR takes
-4 ms: it passes the pre-filter, and the 3-separation search then tries every
-pivot before concluding there is no separation. CMR's `--stats` show it
-deciding at its (co)network stage with one Camion sign check, presumably by
-recognising the support as graphic and then testing only the signs; a
-support-graphicness test here would settle such matrices the same way.
+The largest odd-edge graph (240×360, not TU) took 2–11 s, where CMR takes
+4 ms: it passes the short-cycle filter, and the 3-separation search then
+tried every pivot before concluding there was no separation. CMR's `--stats`
+show it deciding at its (co)network stage with one Camion sign check. With
+that check ported (step 4 above) it takes about 22 ms, and the odd-cycle
+testset went from 26 s to 0.5 s.
 
 ### Known test matrices
 - `F_1`, `F_2`: TU, non-network, non-decomposable
