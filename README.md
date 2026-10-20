@@ -215,27 +215,27 @@ what the first rows of the table mostly show.
 
 | Matrix | Size | TU | CMR | `is_totally_unimodular` |
 |---|---|---|---|---|
-| K₃₃ | 5×4 | true | 0.34 ms | 0.013 ms |
-| F₁ | 5×5 | true | 0.33 ms | 0.009 ms |
-| R10 | 5×5 | true | 0.34 ms | 0.034 ms |
-| R12 | 6×6 | true | 0.95 ms | 0.066 ms |
-| Fano | 3×4 | false | 0.35 ms | 0.013 ms |
-| CMR Eulerian test | 12×12 | false | 3.0 ms | 0.96 ms |
-| CMR partition test | 14×14 | false | 3.7 ms | 1.7 ms |
-| 2-sum chain, 6 blocks | 22×22 | true | 1.5 ms | 0.38 ms |
-| 2-sum chain, 13 blocks | 47×46 | true | 3.2 ms | 1.2 ms |
-| 2-sum chain, 41 blocks | 145×144 | true | 13.4 ms | 6.2 ms |
-| 2-sum chain, 201 blocks | 705×704 | true | 0.22 s | 0.09 – 0.13 s |
-| 2-sum chain (13 blocks) + non-TU block | 50×48 | false | 3.3 ms | 1.3 ms |
-| 2-sum chain (201 blocks) + non-TU block | 708×706 | false | 0.22 s | 0.12 – 0.13 s |
-| random network | 20×40 | true | 0.62 ms | 0.15 ms |
-| random network | 50×100 | true | 1.0 ms | 0.77 ms |
-| random network | 100×200 | true | 1.5 ms | 2.6 ms |
-| random network | 200×400 | true | 2.9 ms | 7.6 ms |
-| network, one entry flipped | 50×100 | false | 0.15 s | 2.5 ms |
+| K₃₃ | 5×4 | true | 0.36 ms | 0.009 ms |
+| F₁ | 5×5 | true | 0.36 ms | 0.007 ms |
+| R10 | 5×5 | true | 0.50 ms | 0.030 ms |
+| R12 | 6×6 | true | 1.0 ms | 0.049 ms |
+| Fano | 3×4 | false | 0.37 ms | 0.011 ms |
+| CMR Eulerian test | 12×12 | false | 2.9 ms | 1.0 ms |
+| CMR partition test | 14×14 | false | 3.8 ms | 1.8 ms |
+| 2-sum chain, 6 blocks | 22×22 | true | 1.5 ms | 0.35 ms |
+| 2-sum chain, 13 blocks | 47×46 | true | 4.0 ms | 1.1 ms |
+| 2-sum chain, 41 blocks | 145×144 | true | 13.1 ms | 6.5 ms |
+| 2-sum chain, 201 blocks | 705×704 | true | 0.24 s | 0.13 s |
+| 2-sum chain (13 blocks) + non-TU block | 50×48 | false | 3.6 ms | 1.1 ms |
+| 2-sum chain (201 blocks) + non-TU block | 708×706 | false | 0.22 s | 0.09 s |
+| random network | 20×40 | true | 0.63 ms | 0.14 ms |
+| random network | 50×100 | true | 0.97 ms | 0.70 ms |
+| random network | 100×200 | true | 1.5 ms | 2.5 ms |
+| random network | 200×400 | true | 3.0 ms | 9.1 ms |
+| network, one entry flipped | 50×100 | false | 0.15 s | 2.4 ms |
 | random sparse, density 0.1 | 30×30 | false | 1.9 ms | 0.29 ms |
-| random sparse, density 0.05 | 100×100 | false | 10.0 ms | 4.0 ms |
-| random sparse, density 0.5 | 20×20 | false | 0.44 ms | 0.35 ms |
+| random sparse, density 0.05 | 100×100 | false | 10.2 ms | 4.1 ms |
+| random sparse, density 0.5 | 20×20 | false | 0.73 ms | 0.34 ms |
 
 The next family has no 2-separation and is neither a network matrix nor the
 transpose of one: the 3-sum of the network matrix of Kₙ with the transpose
@@ -246,16 +246,16 @@ larger ones did not finish.
 
 | Matrix | Size | TU | CMR | `is_totally_unimodular` |
 |---|---|---|---|---|
-| K₅ ⊕₃ K₅* | 10×8 | true | 0.76 ms | 0.17 ms |
-| K₆ ⊕₃ K₅* | 11×12 | true | 1.5 ms | 0.29 ms |
-| K₆ ⊕₃ K₆* | 15×13 | true | 1.9 ms | 0.32 ms |
+| K₅ ⊕₃ K₅* | 10×8 | true | 0.71 ms | 0.10 ms |
+| K₆ ⊕₃ K₅* | 11×12 | true | 1.6 ms | 0.29 ms |
+| K₆ ⊕₃ K₆* | 15×13 | true | 1.7 ms | 0.32 ms |
 | K₇ ⊕₃ K₆* | 16×18 | true | 1.2 ms | 0.43 ms |
 | K₇ ⊕₃ K₇* | 21×19 | true | 1.1 ms | 0.36 ms |
-| K₈ ⊕₃ K₇* | 22×25 | true | 3.0 ms | 0.71 ms |
-| K₈ ⊕₃ K₈* | 28×26 | true | 1.6 ms | 0.72 ms |
-| K₉ ⊕₃ K₉* | 36×34 | true | 6.7 ms | 1.9 ms |
-| K₁₂ ⊕₃ K₁₂* | 66×64 | true | 39.2 ms | 3.2 ms |
-| the nine above, one entry flipped | 10×8 – 66×64 | false | 0.4 – 38 ms | 0.04 – 1.4 ms |
+| K₈ ⊕₃ K₇* | 22×25 | true | 2.8 ms | 0.72 ms |
+| K₈ ⊕₃ K₈* | 28×26 | true | 1.5 ms | 0.72 ms |
+| K₉ ⊕₃ K₉* | 36×34 | true | 6.2 ms | 2.0 ms |
+| K₁₂ ⊕₃ K₁₂* | 66×64 | true | 38.4 ms | 3.3 ms |
+| the nine above, one entry flipped | 10×8 – 66×64 | false | 0.4 – 39 ms | 0.03 – 1.4 ms |
 
 How to read these numbers:
 
@@ -268,8 +268,8 @@ How to read these numbers:
   flipped" and the flipped 66×64 matrix, CMR spends its time enumerating
   3-separation candidates instead.
 - **Larger TU matrices**: within a small factor of each other, in either
-  direction: CMR is about 2.5× ahead on the 200×400 network matrix, this
-  package 3.5× to 12× on the 36×34 and 66×64 3-sums.
+  direction: CMR is about 3× ahead on the 200×400 network matrix, this
+  package 3× to 12× on the 36×34 and 66×64 3-sums.
 
 #### Larger matrices
 
