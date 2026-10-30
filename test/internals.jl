@@ -145,8 +145,10 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         @test _is_network_matrix_few_nonzeros([1 1 0 0; -1 0 1 0; 0 -1 0 1; 0 0 -1 -1])
         # Identity matrix — each column has one nonzero, trivially network
         @test _is_network_matrix_few_nonzeros(Matrix{Int}(I, 3, 3))
-        # Non-network: column with same-sign nonzeros creating odd cycle
-        @test _is_network_matrix_few_nonzeros([1 1; 1 1; 0 1])
+        # Non-network: rows 1 and 2 must get different colours (same-sign
+        # column) and equal ones (opposite-sign column); det = -2.
+        @test !_is_network_matrix_few_nonzeros([1 1; 1 -1])
+        # Odd cycle of same-sign columns
         @test !_is_network_matrix_few_nonzeros([1 1 0; 1 0 1; 0 1 1])
     end
 
@@ -295,7 +297,7 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         @test rank(B) + rank(C) <= 2
         @test size(A, 1) + size(A, 2) >= 4
         @test size(D, 1) + size(D, 2) >= 4
-        # @test [A B; C D] == M_test
+        @test size([A B; C D]) == size(M_test)
 
         # 2-sum can always be decomposed
         A2 = [1 0 1 1; -1 1 0 1; 0 -1 -1 1]
@@ -306,12 +308,9 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
         @test rank(DB) + rank(DC) <= 2
         @test size(DA, 1) + size(DA, 2) >= 4
         @test size(DD, 1) + size(DD, 2) >= 4
-        # @test [DA DB; DC DD] == M2
-
-        # Reconstruction is always correct when decomposition found
-        # found, (A, B, C, D) = _decompose(one_sum(F_1, network_matrix))
-        # @test found
-        # @test [A B; C D] == one_sum(F_1, network_matrix)
+        # The blocks come back with rows and columns permuted, so only the
+        # multiset of entries can be compared with M2.
+        @test sort(vec([DA DB; DC DD])) == sort(vec(M2))
     end
 
     @testset "_extract_rank1" begin
@@ -563,6 +562,16 @@ const non_network_tu = [1 1 0 0 1; 0 0 1 1 1; 1 0 1 0 1; 0 1 0 1 1]
 
         A2 = [1 0; 0 -1]
         ok, ε = _find_epsilon(A2, [2], [2])
+        @test ok && ε == -1
+
+        # A4 = A[R, K] is zero: ε comes from the shortest R–K path, here
+        # r1 c1 r2 c2, with δ the sum of its three entries.
+        ok, ε = _find_epsilon([1 0; 1 1], [1], [2])     # δ = 3
+        @test ok && ε == -1
+        ok, ε = _find_epsilon([1 0; -1 1], [1], [2])    # δ = 1
+        @test ok && ε == 1
+        # A longer path r1 c1 r2 c2 r3 c3: δ = 1 + 1 + 1 - 1 + 1 = 3
+        ok, ε = _find_epsilon([1 0 0; 1 1 0; 0 -1 1], [1], [3])
         @test ok && ε == -1
 
         # No path case

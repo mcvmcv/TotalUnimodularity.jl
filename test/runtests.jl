@@ -90,7 +90,8 @@ include("test_cmr.jl")
     # use tu_both_routes (test_cmr.jl) to cover the :exhaustive route too.
     # Regression: `seen` used to be a global visited-set, so identical blocks
     # in sibling branches (e.g. a 1-sum of a matrix with itself) were treated
-    # as cycles and wrongly reported non-TU. Cycle detection is now path-based.
+    # as cycles and wrongly reported non-TU. (The set has since been removed:
+    # every recursive call is on a strictly smaller matrix.)
     @testset "duplicate blocks in sums" begin
         @test tu_both_routes(one_sum(K33, K33))
         @test tu_both_routes(one_sum(network_matrix, network_matrix))
@@ -280,7 +281,7 @@ include("test_cmr.jl")
                       0  1  0  0  0  0  1
                       0  0  0 -1  0 -1  0
                       1  0  0  0  0 -1  0]
-                @test !tu_both_routes(cmr_abort)
+        @test !tu_both_routes(cmr_abort)
         @test !tu_both_routes(Matrix{Int}(cmr_abort'))
         for alg in (:eulerian, :partition, :naive)
             @test !is_totally_unimodular(cmr_abort; algorithm = alg)
@@ -360,7 +361,7 @@ include("test_cmr.jl")
     end
 
     # Uniform random matrices almost never reach the decomposition cases
-    # (they die at the Eulerian pre-filter or succeed as network matrices).
+    # (they die at the short-cycle pre-filter or succeed as network matrices).
     # Compose structured inputs instead: 1-/2-sums of F_1, F_2, K33, K33ᵀ and
     # random network matrices, with random permutations, ±1 scalings and
     # pivots (all TU-preserving), then optionally flip one entry so that
