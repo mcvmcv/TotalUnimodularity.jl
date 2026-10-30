@@ -456,7 +456,10 @@ implementation on 60,000 random matrices):
 - The submatrices M_k kept all n columns of M, so the recursion carried the
   full width down to pieces with a handful of rows. Columns that are zero
   on the rows of M_k take no part in any step and are dropped
-  (`_split_submatrices(...; drop_zero_columns = true)`).
+  (`_component_submatrix(...; drop_zero_columns = true)`). Each M_k is
+  built only when its turn comes, so a failing one skips copying the rest
+  (705×704 2-sum chain: 97 → 77 MiB per call, median 0.13 → 0.08 s, the
+  difference being garbage collection).
 
 `_build_h` returns adjacency lists and `_is_bipartite` two-colours them;
 it runs once per level on the components, not once per row. With that,
