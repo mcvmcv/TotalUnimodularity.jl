@@ -580,8 +580,8 @@ algorithm (Case 2), given that G_i is disconnected.
 - `orig`: Mapping from vertex index to original row index in M
 
 # Returns
-`(W, W_rows, U)` where W and each U[k] are `Set{Int}` and W_rows is a
-`Dict{Int, Set{Int}}`.
+`(W, W_rows, U)`, all as `BitSet`s: W, W_rows[j] for each row j (W_rows[i]
+is left empty) and U[k] for each component.
 
 # Reference
 Schrijver, *Theory of Linear and Integer Programming*, Chapter 20.
@@ -592,19 +592,15 @@ function _compute_w_sets(M::Matrix{Int}, i::Int,
     m, n = size(M)
 
     # W = support of row i
-    W = Set(findall(!iszero, M[i, :]))
+    W = BitSet(c for c in 1:n if M[i, c] != 0)
 
     # W_j = W ∩ support of row j, for each j ≠ i
-    W_rows = Dict{Int, Set{Int}}()
-    for j in 1:m
-        j == i && continue
-        W_rows[j] = Set(c for c in W if M[j, c] != 0)
-    end
+    W_rows = [j == i ? BitSet() : BitSet(c for c in W if M[j, c] != 0) for j in 1:m]
 
     # U_k = union of W_j for all j in component k
-    U = Vector{Set{Int}}(undef, length(components))
+    U = Vector{BitSet}(undef, length(components))
     for (k, component) in enumerate(components)
-        U_k = Set{Int}()
+        U_k = BitSet()
         for v in component
             union!(U_k, W_rows[orig[v]])
         end
@@ -626,7 +622,7 @@ Two components C_k and C_l are adjacent in H iff:
 # Arguments
 - `components`: Connected components of G_i
 - `orig`: Mapping from vertex index to original row index
-- `W_rows`: Dict mapping row index => W ∩ support(row)
+- `W_rows`: W_rows[j] = W ∩ support(row j)
 - `U`: Vector of sets, U[k] = ∪{W_rows[j] | j ∈ components[k]}
 
 # Reference
@@ -634,8 +630,8 @@ Schrijver, *Theory of Linear and Integer Programming*, Chapter 20.
 """
 function _build_h(components::Vector{Vector{Int}},
                   orig::Vector{Int},
-                  W_rows::Dict{Int, Set{Int}},
-                  U::Vector{Set{Int}})
+                  W_rows::Vector{BitSet},
+                  U::Vector{BitSet})
     p = length(components)
     h = [Int[] for _ in 1:p]
 
@@ -643,14 +639,14 @@ function _build_h(components::Vector{Vector{Int}},
         # Check: ∃ i ∈ C_k such that U_l ⊄ W_i and U_l ∩ W_i ≠ ∅
         k_ok = any(components[k]) do v
             j = orig[v]
-            !issubset(U[l], W_rows[j]) && !isempty(U[l] ∩ W_rows[j])
+            !issubset(U[l], W_rows[j]) && !isdisjoint(U[l], W_rows[j])
         end
         k_ok || continue
 
         # Check: ∃ j ∈ C_l such that U_k ⊄ W_j and U_k ∩ W_j ≠ ∅
         l_ok = any(components[l]) do v
             j = orig[v]
-            !issubset(U[k], W_rows[j]) && !isempty(U[k] ∩ W_rows[j])
+            !issubset(U[k], W_rows[j]) && !isdisjoint(U[k], W_rows[j])
         end
         l_ok || continue
 
@@ -703,12 +699,16 @@ Schrijver, *Theory of Linear and Integer Programming*, Chapter 20.
 function _split_submatrices(M::Matrix{Int}, i::Int,
                              components::Vector{Vector{Int}},
                              orig::Vector{Int}; drop_zero_columns::Bool = false)
-    map(components) do component
-        rows = [i; [orig[v] for v in component]]
-        drop_zero_columns || return M[rows, :]
-        cols = [j for j in 1:size(M, 2) if any(r -> M[r, j] != 0, rows)]
-        M[rows, cols]
-    end
+    [_component_submatrix(M, i, component, orig; drop_zero_columns) for component in components]
+end
+
+# The submatrix M_k of _split_submatrices for one component.
+function _component_submatrix(M::Matrix{Int}, i::Int, component::Vector{Int},
+                              orig::Vector{Int}; drop_zero_columns::Bool = false)
+    rows = [i; [orig[v] for v in component]]
+    drop_zero_columns || return M[rows, :]
+    cols = [j for j in 1:size(M, 2) if any(r -> M[r, j] != 0, rows)]
+    M[rows, cols]
 end
 
 """
@@ -761,8 +761,12 @@ function _is_network_matrix(M::Matrix{Int})
     # Recursively test each submatrix. Columns that are zero on the rows of
     # a submatrix play no part in any step of the test, and dropping them
     # keeps the recursion from carrying the full width of M all the way down.
-    submatrices = _split_submatrices(M, i, components, orig; drop_zero_columns = true)
-    return all(_is_network_matrix, submatrices)
+    # Each submatrix is built only when its turn comes, so that a failure
+    # skips copying the rest.
+    return all(components) do component
+        _is_network_matrix(_component_submatrix(M, i, component, orig;
+                                                drop_zero_columns = true))
+    end
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
