@@ -1,6 +1,9 @@
 module TotalUnimodularity
 
 using PrecompileTools: @setup_workload, @compile_workload
+# Matrix products, adjoints (M') and inv are methods of Base functions that
+# LinearAlgebra defines; it must be loaded for them to exist.
+import LinearAlgebra
 
 # Public API
 export is_totally_unimodular

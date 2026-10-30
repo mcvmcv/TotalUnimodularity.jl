@@ -39,8 +39,8 @@ Once registered:
 ] add TotalUnimodularity
 ```
 
-The only dependency is PrecompileTools; `using TotalUnimodularity` takes
-about 0.1 s.
+The only dependencies are PrecompileTools and the LinearAlgebra standard
+library; `using TotalUnimodularity` takes about 0.1 s.
 
 Documentation of the public functions, with examples:
 <https://mcvmcv.github.io/TotalUnimodularity.jl/dev/>.
